@@ -1,0 +1,21 @@
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  lgtm:
+    uses: phoebeai/lgtm/.github/workflows/lgtm.yml@v1
+    with:
+      config_path: .github/lgtm.yml
+      publish_comment: true
+      publish_inline_comments: true
+      enforce_gate: true
+    secrets:
+      openai_api_key: ${{ secrets.OPENAI_API_KEY }}

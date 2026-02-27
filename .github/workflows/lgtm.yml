@@ -1,0 +1,305 @@
+name: LGTM
+
+on:
+  workflow_call:
+    inputs:
+      workflow_source_repository:
+        description: Repository containing LGTM workflow scripts.
+        required: false
+        type: string
+        default: phoebeai/lgtm
+      workflow_source_ref:
+        description: Ref in workflow_source_repository containing LGTM workflow scripts.
+        required: false
+        type: string
+        default: v1
+      config_path:
+        description: Path to repository-local LGTM config file.
+        required: false
+        type: string
+        default: .github/lgtm.yml
+      pull_request_number:
+        description: Pull request number to review when caller is workflow_dispatch.
+        required: false
+        type: number
+        default: 0
+      model:
+        description: Override model for all reviewers. Empty uses config/default.
+        required: false
+        type: string
+        default: ""
+      effort:
+        description: Override effort for all reviewers. Empty uses config/default.
+        required: false
+        type: string
+        default: ""
+      publish_comment:
+        description: Whether to upsert a sticky PR comment.
+        required: false
+        type: boolean
+        default: true
+      publish_inline_comments:
+        description: Whether to publish line-bound findings as inline PR comments.
+        required: false
+        type: boolean
+        default: true
+      enforce_gate:
+        description: Whether to fail the workflow when consensus outcome is FAIL.
+        required: false
+        type: boolean
+        default: true
+      reviewer_timeout_minutes:
+        description: Timeout for each reviewer execution.
+        required: false
+        type: number
+        default: 10
+    secrets:
+      openai_api_key:
+        description: OpenAI API key for Codex reviewer execution.
+        required: true
+
+concurrency:
+  group: lgtm-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  lgtm:
+    name: LGTM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve workflow source checkout target
+        id: workflow_source
+        env:
+          INPUT_WORKFLOW_SOURCE_REPOSITORY: ${{ inputs.workflow_source_repository }}
+          INPUT_WORKFLOW_SOURCE_REF: ${{ inputs.workflow_source_ref }}
+        run: |
+          workflow_repository="$INPUT_WORKFLOW_SOURCE_REPOSITORY"
+          workflow_ref="$INPUT_WORKFLOW_SOURCE_REF"
+
+          if [[ -z "$workflow_repository" ]]; then
+            echo "workflow_source_repository input cannot be empty." >&2
+            exit 1
+          fi
+
+          if [[ -z "$workflow_ref" ]]; then
+            echo "workflow_source_ref input cannot be empty." >&2
+            exit 1
+          fi
+
+          {
+            echo "workflow_repository=$workflow_repository"
+            echo "workflow_ref=$workflow_ref"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve pull request metadata
+        id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            pr_number="$EVENT_PR_NUMBER"
+            base_sha="$EVENT_BASE_SHA"
+            head_sha="$EVENT_HEAD_SHA"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ -z "$INPUT_PR_NUMBER" || "$INPUT_PR_NUMBER" == "0" ]]; then
+              echo "pull_request_number input is required for workflow_dispatch." >&2
+              exit 1
+            fi
+
+            pr_json="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_URL/repos/$REPOSITORY/pulls/$INPUT_PR_NUMBER")"
+
+            pr_number="$(printf '%s' "$pr_json" | node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(pr.number));')"
+            base_sha="$(printf '%s' "$pr_json" | node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(pr.base.sha);')"
+            head_sha="$(printf '%s' "$pr_json" | node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(pr.head.sha);')"
+          else
+            echo "This reusable workflow requires pull_request context or pull_request_number for workflow_dispatch." >&2
+            exit 1
+          fi
+
+          if [[ -z "$pr_number" || -z "$base_sha" || -z "$head_sha" ]]; then
+            echo "Unable to resolve pull request metadata." >&2
+            exit 1
+          fi
+
+          {
+            echo "pr_number=$pr_number"
+            echo "base_sha=$base_sha"
+            echo "head_sha=$head_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pull request merge ref
+        uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.pr_number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout workflow source repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.workflow_source.outputs.workflow_repository }}
+          ref: ${{ steps.workflow_source.outputs.workflow_ref }}
+          path: workflow-src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: workflow-src/package-lock.json
+
+      - name: Install workflow dependencies
+        working-directory: workflow-src
+        run: npm ci --ignore-scripts
+
+      - name: Load trusted review config
+        id: config
+        env:
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          CONFIG_REL: ${{ inputs.config_path }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_EFFORT: ${{ inputs.effort }}
+          FALLBACK_MODEL: gpt-5.3-codex
+          FALLBACK_EFFORT: xhigh
+        run: node workflow-src/scripts/load-trusted-review-config.mjs
+
+      - name: Collect prior finding memory
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDING_SIGNATURE_SECRET: ${{ secrets.openai_api_key }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PRIOR_FINDINGS_JSON: ${{ runner.temp }}/lgtm-prior-findings.json
+          PRIOR_FINDINGS_MD: ${{ runner.temp }}/lgtm-prior-findings.md
+        run: node workflow-src/scripts/collect-pr-finding-memory.mjs
+
+      - name: Run reviewers
+        env:
+          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+          REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
+          RESOLVED_MODEL: ${{ steps.config.outputs.resolved_model }}
+          RESOLVED_EFFORT: ${{ steps.config.outputs.resolved_effort }}
+          SCHEMA_FILE: ${{ github.workspace }}/workflow-src/schemas/reviewer-output.schema.json
+          PROMPTS_DIR: ${{ runner.temp }}/lgtm-prompts
+          REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
+          PRIOR_FINDINGS_JSON: ${{ runner.temp }}/lgtm-prior-findings.json
+          REVIEWER_TIMEOUT_MINUTES: ${{ inputs.reviewer_timeout_minutes }}
+          WORKSPACE_DIR: ${{ github.workspace }}
+          CODEX_BIN: ${{ github.workspace }}/workflow-src/node_modules/.bin/codex
+          CODEX_PROXY_BIN: ${{ github.workspace }}/workflow-src/node_modules/.bin/codex-responses-api-proxy
+        run: |
+          set -euo pipefail
+
+          CODEX_HOME_DIR="$RUNNER_TEMP/codex-home"
+          SERVER_INFO_FILE="$RUNNER_TEMP/codex-proxy.json"
+          PROXY_LOG_FILE="$RUNNER_TEMP/codex-proxy.log"
+          mkdir -p "$CODEX_HOME_DIR"
+
+          printenv OPENAI_API_KEY | env -u OPENAI_API_KEY "$CODEX_PROXY_BIN" \
+            --http-shutdown \
+            --server-info "$SERVER_INFO_FILE" >"$PROXY_LOG_FILE" 2>&1 &
+
+          for _ in {1..20}; do
+            if [[ -s "$SERVER_INFO_FILE" ]]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ ! -s "$SERVER_INFO_FILE" ]]; then
+            echo "codex-responses-api-proxy did not write server info" >&2
+            cat "$PROXY_LOG_FILE" >&2 || true
+            exit 1
+          fi
+
+          proxy_port="$(
+            node -e 'const fs=require("node:fs"); const info=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if (!info || !Number.isInteger(info.port)) process.exit(1); process.stdout.write(String(info.port));' \
+              "$SERVER_INFO_FILE"
+          )"
+
+          cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+          # Added by LGTM workflow.
+          model_provider = "codex-action-responses-proxy"
+
+          [model_providers.codex-action-responses-proxy]
+          name = "Codex Action Responses Proxy"
+          base_url = "http://127.0.0.1:${proxy_port}/v1"
+          wire_api = "responses"
+          EOF
+
+          env -u OPENAI_API_KEY CODEX_HOME="$CODEX_HOME_DIR" node workflow-src/scripts/run-reviewers-parallel.mjs
+
+      - name: Compute pass/fail consensus
+        id: consensus
+        env:
+          REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
+          REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDING_SIGNATURE_SECRET: ${{ secrets.openai_api_key }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MARKER: "<!-- codex-lgtm -->"
+          SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          COMMENT_PATH: ${{ runner.temp }}/lgtm-comment.md
+          PUBLISH_INLINE_COMMENTS: ${{ inputs.publish_inline_comments }}
+          PRIOR_FINDINGS_JSON: ${{ runner.temp }}/lgtm-prior-findings.json
+        run: node workflow-src/scripts/consensus.mjs
+
+      - name: Persist consensus artifacts
+        if: ${{ always() }}
+        env:
+          REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
+          CONSENSUS_REPORTS: ${{ steps.consensus.outputs.reports_json }}
+          OUTCOME: ${{ steps.consensus.outputs.outcome }}
+          BLOCKING_FINDINGS_COUNT: ${{ steps.consensus.outputs.blocking_findings_count }}
+          REVIEWER_ERRORS_COUNT: ${{ steps.consensus.outputs.reviewer_errors_count }}
+          COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
+        run: node workflow-src/scripts/persist-consensus-artifacts.mjs
+
+      - name: Upload LGTM artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: lgtm-${{ github.run_id }}
+          path: ${{ runner.temp }}/lgtm/
+          retention-days: 14
+
+      - name: Upsert sticky PR comment
+        if: ${{ always() && inputs.publish_comment }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          MARKER: "<!-- codex-lgtm -->"
+          COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
+        run: node workflow-src/scripts/upsert-pr-comment.mjs
+
+      - name: Enforce LGTM gate
+        if: ${{ always() && inputs.enforce_gate }}
+        run: |
+          if [[ "${{ steps.consensus.outputs.outcome }}" != "PASS" ]]; then
+            echo "LGTM outcome is ${{ steps.consensus.outputs.outcome }}; failing workflow by policy."
+            exit 1
+          fi

@@ -1,0 +1,29 @@
+version: 1
+defaults:
+  model: gpt-5.3-codex
+  effort: xhigh
+reviewers:
+  - id: security
+    display_name: Security
+    prompt_file: .github/lgtm/prompts/security.md
+    scope: security risk
+    required: true
+  - id: test_quality
+    display_name: Test Quality
+    prompt_file: .github/lgtm/prompts/test-quality.md
+    scope: test quality and coverage risk
+    required: true
+  - id: infrastructure
+    display_name: Infrastructure
+    prompt_file: .github/lgtm/prompts/infrastructure.md
+    scope: infrastructure and deployment risk
+    required: false
+    paths:
+      - src/infrastructure/**
+      - src/**/migrations/**
+      - compose*.yaml
+  - id: code_quality
+    display_name: Code Quality
+    prompt_file: .github/lgtm/prompts/code-quality.md
+    scope: maintainability and architecture quality risk
+    required: true
