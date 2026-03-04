@@ -104,6 +104,11 @@ function ensureParentDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function logNonFatalGithubError(context, error) {
+  const message = normalizeText(error?.message || "unknown github api error");
+  process.stderr.write(`[consensus] non-fatal ${context} error: ${message}\n`);
+}
+
 function readLedgerInput(priorLedgerJsonPath) {
   const normalizedPath = normalizeText(priorLedgerJsonPath);
   if (!normalizedPath || !fs.existsSync(normalizedPath)) {
@@ -400,38 +405,47 @@ export async function runConsensus({
     });
 
     if (newlyLineBound.length > 0) {
-      const posted = await publishInlineFindingComments({
-        token,
-        repo,
-        prNumber,
-        headSha: sha,
-        entries: newlyLineBound,
-        labelsByReviewerId,
-      });
-
-      if (posted.postedEntries.length > 0) {
-        const { owner, name } = parseRepository(repo);
-        const pullNumber = parsePullNumber(prNumber);
-        const threadIdsByCommentId = await fetchReviewThreadIdsByCommentId({
+      try {
+        const posted = await publishInlineFindingComments({
           token,
-          owner,
-          name,
-          pullNumber,
+          repo,
+          prNumber,
+          headSha: sha,
+          entries: newlyLineBound,
+          labelsByReviewerId,
         });
 
-        const entriesWithThreadIds = posted.postedEntries.map((entry) => ({
-          ...entry,
-          inline_thread_id:
-            Number.isInteger(entry.comment_id) && threadIdsByCommentId.has(entry.comment_id)
-              ? threadIdsByCommentId.get(entry.comment_id)
-              : "",
-        }));
+        if (posted.postedEntries.length > 0) {
+          let threadIdsByCommentId = new Map();
+          try {
+            const { owner, name } = parseRepository(repo);
+            const pullNumber = parsePullNumber(prNumber);
+            threadIdsByCommentId = await fetchReviewThreadIdsByCommentId({
+              token,
+              owner,
+              name,
+              pullNumber,
+            });
+          } catch (error) {
+            logNonFatalGithubError("fetchReviewThreadIdsByCommentId", error);
+          }
 
-        ledger = applyInlineCommentMetadata({
-          ledger,
-          entries: entriesWithThreadIds,
-        });
-        findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
+          const entriesWithThreadIds = posted.postedEntries.map((entry) => ({
+            ...entry,
+            inline_thread_id:
+              Number.isInteger(entry.comment_id) && threadIdsByCommentId.has(entry.comment_id)
+                ? threadIdsByCommentId.get(entry.comment_id)
+                : "",
+          }));
+
+          ledger = applyInlineCommentMetadata({
+            ledger,
+            entries: entriesWithThreadIds,
+          });
+          findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
+        }
+      } catch (error) {
+        logNonFatalGithubError("publishInlineFindingComments", error);
       }
     }
 
@@ -441,7 +455,11 @@ export async function runConsensus({
       const finding = findingById.get(findingId);
       const threadId = normalizeText(finding?.inline_thread_id);
       if (!threadId) continue;
-      await setReviewThreadResolved({ token, threadId, resolved: true });
+      try {
+        await setReviewThreadResolved({ token, threadId, resolved: true });
+      } catch (error) {
+        logNonFatalGithubError("resolveReviewThread", error);
+      }
     }
 
     for (const entry of merged.reopenedEntries) {
@@ -449,7 +467,11 @@ export async function runConsensus({
       const finding = findingById.get(findingId);
       const threadId = normalizeText(finding?.inline_thread_id);
       if (!threadId) continue;
-      await setReviewThreadResolved({ token, threadId, resolved: false });
+      try {
+        await setReviewThreadResolved({ token, threadId, resolved: false });
+      } catch (error) {
+        logNonFatalGithubError("unresolveReviewThread", error);
+      }
     }
   }
 

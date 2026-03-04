@@ -731,3 +731,140 @@ test("runConsensus maps inline threads, resolves old threads, and unresolves reo
   assert.equal(sec3.inline_comment_id, 501);
   assert.equal(sec3.inline_thread_id, "thread-new");
 });
+
+test("runConsensus tolerates non-fatal GitHub thread lifecycle API errors", async (t) => {
+  const tempDir = createTempDir(t, "consensus-non-fatal-thread-errors-");
+  const reportsDir = path.join(tempDir, "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+
+  writeReport(
+    reportsDir,
+    "security",
+    baseReport({
+      new_findings: [
+        {
+          title: "New issue with comment",
+          file: "src/new.ts",
+          line: 9,
+          recommendation: "Fix new issue",
+          reopen_finding_id: null,
+        },
+      ],
+    }),
+  );
+
+  const priorLedgerPath = path.join(tempDir, "prior-ledger.json");
+  fs.writeFileSync(
+    priorLedgerPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        findings: [
+          {
+            id: "SEC-1",
+            reviewer: "security",
+            status: "open",
+            title: "Old open issue",
+            recommendation: "Fix old issue",
+            file: "src/old.ts",
+            line: 3,
+            inline_thread_id: "thread-resolve",
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    const target = String(url);
+
+    if (method === "POST" && /\/pulls\/9\/comments$/.test(target)) {
+      return new Response(
+        JSON.stringify({
+          id: 601,
+          html_url: "https://github.com/owner/repo/pull/9#discussion_r601",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "POST" && target === "https://api.github.com/graphql") {
+      return new Response(
+        JSON.stringify({
+          errors: [
+            {
+              message: "Resource not accessible by integration",
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "GET" && /\/pulls\/9$/.test(target)) {
+      return new Response(
+        JSON.stringify({
+          number: 9,
+          user: { login: "author" },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "GET" && /\/pulls\/9\/reviews\?/.test(target)) {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected request ${method} ${target}`);
+  };
+
+  const result = await runConsensus({
+    runId: "106",
+    sha: "abc888",
+    commentPath: path.join(tempDir, "comment.md"),
+    ledgerPath: path.join(tempDir, "ledger.json"),
+    token: "token",
+    repo: "owner/repo",
+    prNumber: "9",
+    marker: "<!-- marker -->",
+    reportsDir,
+    reviewersJson: JSON.stringify([
+      {
+        id: "security",
+        display_name: "Security",
+      },
+    ]),
+    publishInlineComments: "true",
+    priorLedgerJson: priorLedgerPath,
+  });
+
+  assert.equal(result.outcome, "FAIL");
+  assert.equal(result.outcomeReason, "FAIL_OPEN_FINDINGS");
+  assert.equal(result.reviewerErrorsCount, 0);
+  assert.equal(result.openFindingsCount, 2);
+
+  const ledger = JSON.parse(fs.readFileSync(path.join(tempDir, "ledger.json"), "utf8"));
+  const sec2 = ledger.findings.find((finding) => finding.id === "SEC-2");
+  assert.equal(sec2.inline_comment_id, 601);
+});
