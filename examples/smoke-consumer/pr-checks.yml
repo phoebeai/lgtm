@@ -3,8 +3,6 @@ name: PR Checks
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
 
 permissions:
   contents: read
@@ -19,5 +17,6 @@ jobs:
       publish_comment: true
       publish_inline_comments: true
       enforce_gate: true
+      auto_approve_no_findings: true
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}

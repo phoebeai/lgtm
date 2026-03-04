@@ -78,7 +78,6 @@ function normalizeOutcomeReason(value) {
   const normalized = String(value || "").trim().toUpperCase();
   if (
     normalized === "PASS_NO_FINDINGS"
-    || normalized === "PASS_HUMAN_BYPASS"
     || normalized === "FAIL_OPEN_FINDINGS"
     || normalized === "FAIL_REVIEWER_ERRORS"
   ) {
@@ -91,8 +90,6 @@ function renderOutcomeSummary({ outcomeReason, openFindingsCount, reviewerErrors
   switch (normalizeOutcomeReason(outcomeReason)) {
     case "PASS_NO_FINDINGS":
       return "No open findings.";
-    case "PASS_HUMAN_BYPASS":
-      return "Human approval bypass is active.";
     case "FAIL_REVIEWER_ERRORS":
       return `${reviewerErrorsCount} reviewer error${reviewerErrorsCount === 1 ? "" : "s"} detected.`;
     default:
@@ -179,13 +176,11 @@ export function renderConsensusComment({
   resolvedEntries,
   reviewerErrors,
   labelsByReviewerId,
-  humanBypass,
 }) {
   const normalizedOpenEntries = normalizeEntries(openEntries);
   const normalizedResolvedEntries = normalizeEntries(resolvedEntries);
   const normalizedReviewerErrors = Array.isArray(reviewerErrors) ? reviewerErrors : [];
   const normalizedLabelsByReviewerId = labelsByReviewerId instanceof Map ? labelsByReviewerId : new Map();
-  const normalizedHumanBypass = humanBypass && typeof humanBypass === "object" ? humanBypass : null;
 
   const lines = [];
   lines.push(marker);
@@ -204,19 +199,6 @@ export function renderConsensusComment({
     }),
   );
   lines.push("");
-
-  if (normalizedHumanBypass?.approved === true) {
-    const approvers = Array.isArray(normalizedHumanBypass.approvers)
-      ? normalizedHumanBypass.approvers.filter((item) => typeof item === "string" && item.trim().length > 0)
-      : [];
-    lines.push("### Human Bypass");
-    if (approvers.length > 0) {
-      lines.push(`- Approved by: ${approvers.join(", ")}`);
-    } else {
-      lines.push("- Approved by at least one non-bot reviewer on the latest head commit.");
-    }
-    lines.push("");
-  }
 
   pushReviewerErrorsSection(lines, normalizedReviewerErrors);
   pushFindingsSection(lines, "Open Findings", normalizedOpenEntries, normalizedLabelsByReviewerId);

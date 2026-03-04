@@ -11,7 +11,6 @@ export function writeConsensusOutputs({
   reviewerErrorsCount,
   reports,
   failureReasons,
-  humanBypassApproved,
 }) {
   writeGithubOutput("outcome", outcome);
   writeGithubOutput("outcome_reason", outcomeReason);
@@ -21,7 +20,6 @@ export function writeConsensusOutputs({
   writeGithubOutput("reviewer_errors_count", String(reviewerErrorsCount));
   writeGithubOutput("reports_json", JSON.stringify(reports));
   writeGithubOutput("failure_reasons", JSON.stringify(failureReasons));
-  writeGithubOutput("human_bypass_approved", humanBypassApproved ? "true" : "false");
 
   // Backward-compat output name retained for callers/tests still expecting it.
   writeGithubOutput("blocking_findings_count", String(openFindingsCount));

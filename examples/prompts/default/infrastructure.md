@@ -23,6 +23,28 @@ Do not restate lint/style issues unless they directly translate to deployment or
 For each finding, include file and line when available.
 Explain concrete operational impact and blast radius.
 
+## Finding Decision (Strict)
+
+Default to reporting no findings.
+
+Report a finding only when **all** are true:
+
+1. This PR introduces a concrete deploy/runtime/data-loss risk that is likely on next rollout (or rollback).
+2. The risk is directly evidenced by changed code/config in this PR.
+3. There is no reasonable existing safeguard that already prevents the impact.
+4. The fix is specific and practical for this PR (not a broad platform hardening project).
+
+If any condition above is not met, do not report a finding.
+
+Do not report findings only for:
+
+1. Missing broad IaC test coverage or generalized "add Pulumi mocks"
+2. Demands for exhaustive migration simulation without an immediate concrete failure path
+3. Optional observability/guardrail improvements that can be follow-up work
+4. Theoretical rollback concerns not tied to currently deployed/active paths
+
+Use at most one finding unless there are clearly independent, concrete infrastructure risks.
+
 ## Output Contract
 
 Return JSON only with this exact shape:
@@ -32,12 +54,16 @@ Return JSON only with this exact shape:
 - include concise `summary`
 - include `resolved_finding_ids` array (can be empty)
 - include `new_findings` array (can be empty)
-- each `new_findings` item must include:
+- each `new_findings` entry must include:
   - `title` (short)
   - `file` (string path, or `null` when unknown)
   - `line` (positive integer, or `null` when unknown)
   - `recommendation` (concrete remediation)
-  - optional `reopen_finding_id` (existing finding ID to reopen)
+  - `reopen_finding_id` (string finding id to reopen, or `null`)
+- when a prior finding no longer exists, add its id to `resolved_finding_ids`
+- when a prior finding still exists, do not duplicate it in `new_findings`
+- when a previously resolved finding reappears, set `reopen_finding_id` to that id
+- when a finding is brand new, set `reopen_finding_id` to `null`
 - include `errors` array always (use `[]` when none)
 - include every key above exactly; do not omit keys
 

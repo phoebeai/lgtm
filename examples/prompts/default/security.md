@@ -24,6 +24,28 @@ Avoid reporting issues that are clearly covered by existing linters/static analy
 For each finding, include file and line when available.
 Use concrete exploitability reasoning, not generic warnings.
 
+## Finding Decision (Strict)
+
+Default to reporting no findings.
+
+Report a finding only when **all** are true:
+
+1. There is a credible exploit path from this PR's changed code/config in a realistic threat model.
+2. Impact is material (authz bypass, data exposure/tampering, privilege escalation, or significant blast-radius increase).
+3. Existing controls/tests are unlikely to catch/prevent the issue before harm.
+4. The mitigation is concrete and feasible within this PR.
+
+If any condition above is not met, do not report a finding.
+
+Do not report findings for:
+
+1. Generic hardening advice without a concrete exploit path
+2. Low-confidence "might be risky" speculation
+3. Minor hygiene issues with negligible security impact
+4. Broad security-program recommendations better handled in follow-up work
+
+Use at most one finding unless there are clearly independent, concrete security risks.
+
 ## Output Contract
 
 Return JSON only with this exact shape:
@@ -33,12 +55,16 @@ Return JSON only with this exact shape:
 - include concise `summary`
 - include `resolved_finding_ids` array (can be empty)
 - include `new_findings` array (can be empty)
-- each `new_findings` item must include:
+- each `new_findings` entry must include:
   - `title` (short)
   - `file` (string path, or `null` when unknown)
   - `line` (positive integer, or `null` when unknown)
   - `recommendation` (concrete remediation)
-  - optional `reopen_finding_id` (existing finding ID to reopen)
+  - `reopen_finding_id` (string finding id to reopen, or `null`)
+- when a prior finding no longer exists, add its id to `resolved_finding_ids`
+- when a prior finding still exists, do not duplicate it in `new_findings`
+- when a previously resolved finding reappears, set `reopen_finding_id` to that id
+- when a finding is brand new, set `reopen_finding_id` to `null`
 - include `errors` array always (use `[]` when none)
 - include every key above exactly; do not omit keys
 

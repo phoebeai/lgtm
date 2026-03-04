@@ -30,12 +30,11 @@ test("ci workflow runs npm tests on all PR and main-branch push changes", () => 
   assert.ok(steps.includes("npm test"));
 });
 
-test("dogfood workflow calls reusable workflow with gate settings and review-event refresh", () => {
+test("dogfood workflow calls reusable workflow with gate and auto-approval settings", () => {
   const dogfood = readWorkflowObject(DOGFOOD_WORKFLOW_PATH);
 
   assert.equal(dogfood.name, "Dogfood");
   assert.ok(dogfood.on.pull_request);
-  assert.deepEqual(dogfood.on.pull_request_review.types, ["submitted", "edited", "dismissed"]);
   assert.ok(dogfood.on.workflow_dispatch?.inputs?.pull_request_number);
 
   const job = dogfood.jobs.dogfood;
@@ -44,6 +43,7 @@ test("dogfood workflow calls reusable workflow with gate settings and review-eve
   assert.equal(job.with.publish_comment, true);
   assert.equal(job.with.publish_inline_comments, true);
   assert.equal(job.with.enforce_gate, true);
+  assert.equal(job.with.auto_approve_no_findings, true);
   assert.match(String(job.if), /head\.repo\.full_name == github\.repository/);
 });
 
@@ -74,6 +74,10 @@ test("reusable lgtm workflow runs as a single LGTM job", () => {
   assert.match(
     workflowText,
     /Compute pass\/fail consensus[\s\S]*?PRIOR_LEDGER_JSON:\s*\$\{\{\s*steps\.prior_ledger\.outputs\.prior_ledger_json\s*\}\}/,
+  );
+  assert.match(
+    workflowText,
+    /Auto-approve PR when no findings[\s\S]*?steps\.consensus\.outputs\.outcome_reason == 'PASS_NO_FINDINGS'/,
   );
 });
 
@@ -112,7 +116,8 @@ test("smoke-consumer workflow pins reusable workflow to v1 and grants required p
   assert.equal(workflow.permissions?.contents, "read");
   assert.equal(workflow.permissions?.["pull-requests"], "write");
   assert.equal(workflow.permissions?.actions, "read");
-  assert.deepEqual(workflow.on?.pull_request_review?.types, ["submitted", "edited", "dismissed"]);
+  assert.equal(workflow.jobs?.lgtm?.with?.auto_approve_no_findings, true);
+  assert.deepEqual(workflow.on?.pull_request?.types, ["opened", "reopened", "synchronize", "ready_for_review"]);
 });
 
 test("reviewer output schema allows dynamic reviewer ids", () => {

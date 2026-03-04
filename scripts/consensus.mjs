@@ -23,7 +23,6 @@ import {
 import {
   githubGraphqlRequest,
   githubRequest,
-  githubRequestAllPages,
 } from "./shared/github-client.mjs";
 
 const RESOLVE_REVIEW_THREAD_MUTATION = `
@@ -60,14 +59,6 @@ function parseRepository(repo) {
     throw new Error("GITHUB_REPOSITORY must be owner/name");
   }
   return { owner, name };
-}
-
-function parsePullNumber(value) {
-  const parsed = Number.parseInt(String(value || "").trim(), 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error("PR_NUMBER must be a positive integer");
-  }
-  return parsed;
 }
 
 function readReportInput(reportsDir, reviewerId) {
@@ -193,109 +184,7 @@ async function setReviewThreadResolved({
   return true;
 }
 
-function isNonBotUser(review) {
-  const login = String(review?.user?.login || "").trim();
-  const type = String(review?.user?.type || "").trim().toLowerCase();
-  if (!login) return false;
-  if (type === "bot") return false;
-  if (login.toLowerCase().endsWith("[bot]")) return false;
-  return true;
-}
-
-const TRUSTED_APPROVER_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-
-function isTrustedApprover(review) {
-  const association = normalizeText(review?.author_association).toUpperCase();
-  return TRUSTED_APPROVER_ASSOCIATIONS.has(association);
-}
-
-function pickLatestReviewsByUser(reviews) {
-  const latestByUser = new Map();
-
-  for (const review of Array.isArray(reviews) ? reviews : []) {
-    if (!isNonBotUser(review)) continue;
-    const login = String(review.user.login).trim().toLowerCase();
-
-    const existing = latestByUser.get(login);
-    if (!existing) {
-      latestByUser.set(login, review);
-      continue;
-    }
-
-    const existingDate = Date.parse(existing.submitted_at || "");
-    const currentDate = Date.parse(review.submitted_at || "");
-
-    if (!Number.isNaN(currentDate) && Number.isNaN(existingDate)) {
-      latestByUser.set(login, review);
-      continue;
-    }
-
-    if (!Number.isNaN(currentDate) && !Number.isNaN(existingDate) && currentDate >= existingDate) {
-      latestByUser.set(login, review);
-      continue;
-    }
-
-    if (Number(review.id) > Number(existing.id)) {
-      latestByUser.set(login, review);
-    }
-  }
-
-  return latestByUser;
-}
-
-async function fetchHumanBypassApproval({ token, repo, prNumber, headSha }) {
-  const normalizedToken = normalizeText(token);
-  const normalizedHeadSha = normalizeText(headSha);
-  if (!normalizedToken || !normalizedHeadSha) {
-    return {
-      approved: false,
-      approvers: [],
-    };
-  }
-
-  const { owner, name } = parseRepository(repo);
-  const pullNumber = parsePullNumber(prNumber);
-  const pullRequest = await githubRequest({
-    method: "GET",
-    token: normalizedToken,
-    url: `https://api.github.com/repos/${owner}/${name}/pulls/${pullNumber}`,
-  });
-  const pullRequestAuthor = normalizeText(pullRequest?.user?.login).toLowerCase();
-
-  const reviews = await githubRequestAllPages({
-    token: normalizedToken,
-    url: `https://api.github.com/repos/${owner}/${name}/pulls/${pullNumber}/reviews?per_page=100&page=1`,
-  });
-
-  const latestByUser = pickLatestReviewsByUser(reviews);
-  const approvers = [];
-
-  for (const review of latestByUser.values()) {
-    const state = String(review?.state || "").trim().toUpperCase();
-    const commitId = normalizeText(review?.commit_id);
-    const approverLogin = normalizeText(review?.user?.login);
-    if (state !== "APPROVED") continue;
-    if (!commitId || commitId !== normalizedHeadSha) continue;
-    if (!approverLogin) continue;
-    if (pullRequestAuthor && approverLogin.toLowerCase() === pullRequestAuthor) continue;
-    if (!isTrustedApprover(review)) continue;
-    approvers.push(approverLogin);
-  }
-
-  return {
-    approved: approvers.length > 0,
-    approvers,
-  };
-}
-
-function evaluateOutcome({ humanBypassApproved, reviewerErrorsCount, openFindingsCount }) {
-  if (humanBypassApproved) {
-    return {
-      outcome: "PASS",
-      outcomeReason: "PASS_HUMAN_BYPASS",
-    };
-  }
-
+function evaluateOutcome({ reviewerErrorsCount, openFindingsCount }) {
   if (reviewerErrorsCount > 0) {
     return {
       outcome: "FAIL",
@@ -478,22 +367,7 @@ export async function runConsensus({
   const openEntries = toPresentationEntries(ledger.findings, "open");
   const resolvedEntries = toPresentationEntries(ledger.findings, "resolved");
 
-  let humanBypass = {
-    approved: false,
-    approvers: [],
-  };
-
-  if (canUseGithub) {
-    humanBypass = await fetchHumanBypassApproval({
-      token,
-      repo,
-      prNumber,
-      headSha: sha,
-    });
-  }
-
   const { outcome, outcomeReason } = evaluateOutcome({
-    humanBypassApproved: humanBypass.approved,
     reviewerErrorsCount: reviewerErrors.length,
     openFindingsCount: openEntries.length,
   });
@@ -511,7 +385,6 @@ export async function runConsensus({
     resolvedEntries,
     reviewerErrors,
     labelsByReviewerId,
-    humanBypass,
   });
 
   ensureParentDir(normalizedCommentPath);
@@ -528,7 +401,6 @@ export async function runConsensus({
     reviewerErrorsCount: reviewerErrors.length,
     reports,
     failureReasons,
-    humanBypassApproved: humanBypass.approved,
   });
 
   return {
@@ -540,7 +412,6 @@ export async function runConsensus({
     reviewerErrorsCount: reviewerErrors.length,
     reports,
     failureReasons,
-    humanBypass,
   };
 }
 

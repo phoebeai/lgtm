@@ -13,7 +13,7 @@ Files:
 2. Add prompt files referenced by `.github/lgtm.yml` under `.github/lgtm/prompts/`.
 3. Add `OPENAI_API_KEY` repository secret.
 4. Merge this setup to your default branch.
-5. In a follow-up PR, copy `pr-checks.yml` to `.github/workflows/pr-checks.yml` (includes `pull_request_review` triggers so approval bypass status refreshes immediately).
+5. In a follow-up PR, copy `pr-checks.yml` to `.github/workflows/pr-checks.yml`.
 
 Token permissions:
 
@@ -23,6 +23,8 @@ Token permissions:
   - `contents: read`
   - `actions: read`
 - In repository settings, set `Actions -> General -> Workflow permissions` to `Read and write permissions`.
+- If you want LGTM to auto-approve clean PRs, set `with.auto_approve_no_findings: true` and enable
+  `Actions -> General -> Allow GitHub Actions to create and approve pull requests`.
 
 You can start prompt content from `examples/prompts/default/` in this repository.
 

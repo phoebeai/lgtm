@@ -339,8 +339,8 @@ test("runConsensus reopens resolved findings with reopen_finding_id using same f
   assert.equal(ledger.findings[0].title, "Existing blocker (reopened)");
 });
 
-test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on head sha", async (t) => {
-  const tempDir = createTempDir(t, "consensus-human-bypass-");
+test("runConsensus does not use review approvals for bypass and fails on reviewer errors", async (t) => {
+  const tempDir = createTempDir(t, "consensus-no-bypass-");
   const reportsDir = path.join(tempDir, "reports");
   fs.mkdirSync(reportsDir, { recursive: true });
 
@@ -384,81 +384,7 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
 
   globalThis.fetch = async (url, options = {}) => {
     const method = options.method || "GET";
-    const target = String(url);
-
-    if (method === "GET" && /\/pulls\/7$/.test(target)) {
-      return new Response(
-        JSON.stringify({
-          number: 7,
-          user: { login: "alice" },
-        }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    }
-
-    if (method === "GET" && /\/pulls\/7\/reviews\?/.test(target)) {
-      return new Response(
-        JSON.stringify([
-          {
-            id: 1,
-            state: "APPROVED",
-            commit_id: "oldsha",
-            submitted_at: "2026-01-01T00:00:00Z",
-            author_association: "OWNER",
-            user: { login: "alice", type: "User" },
-          },
-          {
-            id: 2,
-            state: "APPROVED",
-            commit_id: "abc123",
-            submitted_at: "2026-01-02T00:00:00Z",
-            author_association: "MEMBER",
-            user: { login: "bob", type: "User" },
-          },
-          {
-            id: 3,
-            state: "APPROVED",
-            commit_id: "abc123",
-            submitted_at: "2026-01-03T00:00:00Z",
-            author_association: "MEMBER",
-            user: { login: "github-actions[bot]", type: "Bot" },
-          },
-          {
-            id: 4,
-            state: "DISMISSED",
-            commit_id: "abc123",
-            submitted_at: "2026-01-04T00:00:00Z",
-            author_association: "MEMBER",
-            user: { login: "carol", type: "User" },
-          },
-          {
-            id: 5,
-            state: "APPROVED",
-            commit_id: "abc123",
-            submitted_at: "2026-01-05T00:00:00Z",
-            author_association: "CONTRIBUTOR",
-            user: { login: "dave", type: "User" },
-          },
-          {
-            id: 6,
-            state: "APPROVED",
-            commit_id: "abc123",
-            submitted_at: "2026-01-06T00:00:00Z",
-            author_association: "OWNER",
-            user: { login: "alice", type: "User" },
-          },
-        ]),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    }
-
-    throw new Error(`Unexpected request ${method} ${target}`);
+    throw new Error(`Unexpected request ${method} ${String(url)}`);
   };
 
   const result = await runConsensus({
@@ -485,10 +411,8 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
     priorLedgerJson: "",
   });
 
-  assert.equal(result.outcome, "PASS");
-  assert.equal(result.outcomeReason, "PASS_HUMAN_BYPASS");
-  assert.equal(result.humanBypass.approved, true);
-  assert.deepEqual(result.humanBypass.approvers, ["bob"]);
+  assert.equal(result.outcome, "FAIL");
+  assert.equal(result.outcomeReason, "FAIL_REVIEWER_ERRORS");
 });
 
 test("runConsensus updates existing inline comments for resolved/reopened findings and avoids duplicate reopen comments", async (t) => {

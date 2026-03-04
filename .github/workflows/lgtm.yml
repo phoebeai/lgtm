@@ -53,6 +53,11 @@ on:
         required: false
         type: number
         default: 10
+      auto_approve_no_findings:
+        description: When true, submit an APPROVE review on PASS_NO_FINDINGS outcomes.
+        required: false
+        type: boolean
+        default: false
     secrets:
       openai_api_key:
         description: OpenAI API key for Codex reviewer execution.
@@ -281,6 +286,15 @@ jobs:
           PUBLISH_INLINE_COMMENTS: ${{ inputs.publish_inline_comments }}
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
         run: node workflow-src/scripts/consensus.mjs
+
+      - name: Auto-approve PR when no findings
+        if: ${{ always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason == 'PASS_NO_FINDINGS' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SHA: ${{ steps.pr.outputs.head_sha }}
+        run: node workflow-src/scripts/approve-pr-when-clean.mjs
 
       - name: Persist consensus artifacts
         if: ${{ always() }}

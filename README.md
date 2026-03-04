@@ -8,7 +8,8 @@ Reusable GitHub Actions workflow for blocker-first pull request review with mult
 - Trusted config and prompts loaded from the PR base revision.
 - Findings ledger lifecycle (`open`/`resolved`) persisted as a run artifact.
 - Sticky PR summary comment with open/resolved sections and optional inline findings.
-- PASS/FAIL gate based on reviewer errors + open findings, with optional human approval bypass.
+- PASS/FAIL gate based on reviewer errors + open findings.
+- Optional auto-approval when no findings are open.
 
 ## Quick Start
 
@@ -47,8 +48,6 @@ name: PR Checks
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
 
 permissions:
   contents: read
@@ -63,6 +62,7 @@ jobs:
       publish_comment: true
       publish_inline_comments: true
       enforce_gate: true
+      auto_approve_no_findings: true
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
@@ -102,6 +102,7 @@ Inputs exposed by `.github/workflows/lgtm.yml`:
 - `publish_inline_comments` (default `true`)
 - `enforce_gate` (default `true`)
 - `reviewer_timeout_minutes` (default `10`)
+- `auto_approve_no_findings` (default `false`)
 - `pull_request_number` (used by `workflow_dispatch` callers)
 
 Required secret:
@@ -115,6 +116,8 @@ GitHub auth:
   - `pull-requests: write`
   - `contents: read`
   - `actions: read`
+- To allow bot approvals, enable:
+  - `Settings -> Actions -> General -> Allow GitHub Actions to create and approve pull requests`
 - In repository settings, enable workflow token write permissions:
   - `Settings -> Actions -> General -> Workflow permissions -> Read and write permissions`
 

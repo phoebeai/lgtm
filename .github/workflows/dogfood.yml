@@ -3,8 +3,6 @@ name: Dogfood
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -20,7 +18,7 @@ permissions:
 jobs:
   dogfood:
     if: >-
-      ((github.event_name == 'pull_request' || github.event_name == 'pull_request_review') &&
+      (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/lgtm.yml
@@ -33,6 +31,7 @@ jobs:
       publish_comment: true
       publish_inline_comments: true
       enforce_gate: true
+      auto_approve_no_findings: true
       pull_request_number: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || 0 }}
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
