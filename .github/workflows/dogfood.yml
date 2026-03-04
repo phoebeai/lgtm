@@ -36,3 +36,4 @@ jobs:
       pull_request_number: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || 0 }}
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      github_api_token: ${{ secrets.LGTM_GITHUB_TOKEN }}

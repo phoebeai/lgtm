@@ -21,3 +21,4 @@ jobs:
       enforce_gate: true
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      github_api_token: ${{ secrets.LGTM_GITHUB_TOKEN }}

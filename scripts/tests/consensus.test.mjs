@@ -536,6 +536,7 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
             file: "src/old.ts",
             line: 3,
             inline_comment_id: 401,
+            inline_thread_id: "thread-resolve",
           },
           {
             id: "SEC-2",
@@ -546,6 +547,7 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
             file: "src/reopen.ts",
             line: 22,
             inline_comment_id: 402,
+            inline_thread_id: "thread-reopen",
           },
         ],
       },
@@ -557,6 +559,7 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
 
   const postedInlineBodies = [];
   const patchedInlineComments = [];
+  const threadMutations = [];
   const originalFetch = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -597,6 +600,52 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
           headers: { "content-type": "application/json" },
         },
       );
+    }
+
+    if (method === "POST" && target === "https://api.github.com/graphql") {
+      const payload = JSON.parse(String(options.body || "{}"));
+      const query = String(payload.query || "");
+      const threadId = String(payload?.variables?.threadId || "");
+
+      if (query.includes("ResolveReviewThread")) {
+        threadMutations.push({ action: "resolve", threadId });
+        return new Response(
+          JSON.stringify({
+            data: {
+              resolveReviewThread: {
+                thread: {
+                  id: threadId,
+                  isResolved: true,
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (query.includes("UnresolveReviewThread")) {
+        threadMutations.push({ action: "unresolve", threadId });
+        return new Response(
+          JSON.stringify({
+            data: {
+              unresolveReviewThread: {
+                thread: {
+                  id: threadId,
+                  isResolved: false,
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
     }
 
     if (method === "GET" && /\/pulls\/8$/.test(target)) {
@@ -658,6 +707,16 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
   const reopenedPatch = patchedInlineComments.find((entry) => entry.commentId === 402);
   assert.match(resolvedPatch.body, /Status: Resolved in latest run\./);
   assert.doesNotMatch(reopenedPatch.body, /Status: Resolved in latest run\./);
+  assert.deepEqual(threadMutations, [
+    {
+      action: "resolve",
+      threadId: "thread-resolve",
+    },
+    {
+      action: "unresolve",
+      threadId: "thread-reopen",
+    },
+  ]);
 
   const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
   const sec1 = ledger.findings.find((finding) => finding.id === "SEC-1");
@@ -665,8 +724,10 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
   const sec3 = ledger.findings.find((finding) => finding.id === "SEC-3");
   assert.equal(sec1.status, "resolved");
   assert.equal(sec1.inline_comment_id, 401);
+  assert.equal(sec1.inline_thread_id, "thread-resolve");
   assert.equal(sec2.status, "open");
   assert.equal(sec2.inline_comment_id, 402);
+  assert.equal(sec2.inline_thread_id, "thread-reopen");
   assert.equal(sec3.status, "open");
   assert.equal(sec3.inline_comment_id, 501);
 });
@@ -701,6 +762,7 @@ test("runConsensus tolerates non-fatal inline comment update API errors", async 
             file: "src/old.ts",
             line: 3,
             inline_comment_id: 777,
+            inline_thread_id: "thread-resolve",
           },
         ],
       },
@@ -724,6 +786,22 @@ test("runConsensus tolerates non-fatal inline comment update API errors", async 
         JSON.stringify({ message: "Resource not accessible by integration" }),
         {
           status: 403,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "POST" && target === "https://api.github.com/graphql") {
+      return new Response(
+        JSON.stringify({
+          errors: [
+            {
+              message: "Resource not accessible by integration",
+            },
+          ],
+        }),
+        {
+          status: 200,
           headers: { "content-type": "application/json" },
         },
       );

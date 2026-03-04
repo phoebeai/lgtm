@@ -21,9 +21,32 @@ import {
   normalizeLedger,
 } from "./shared/findings-ledger.mjs";
 import {
+  githubGraphqlRequest,
   githubRequest,
   githubRequestAllPages,
 } from "./shared/github-client.mjs";
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation ResolveReviewThread($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
+
+const UNRESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation UnresolveReviewThread($threadId: ID!) {
+    unresolveReviewThread(input: { threadId: $threadId }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
 
 function normalizeText(value) {
   return String(value ?? "")
@@ -146,6 +169,27 @@ async function updateInlineFindingComment({
       body,
     },
   });
+  return true;
+}
+
+async function setReviewThreadResolved({
+  token,
+  threadId,
+  resolved,
+}) {
+  const normalizedThreadId = normalizeText(threadId);
+  if (!normalizedThreadId) {
+    return false;
+  }
+
+  await githubGraphqlRequest({
+    token,
+    query: resolved ? RESOLVE_REVIEW_THREAD_MUTATION : UNRESOLVE_REVIEW_THREAD_MUTATION,
+    variables: {
+      threadId: normalizedThreadId,
+    },
+  });
+
   return true;
 }
 
@@ -362,6 +406,20 @@ export async function runConsensus({
       const findingId = normalizeText(entry?.finding?.id).toUpperCase();
       const finding = findingById.get(findingId);
       const commentId = Number(finding?.inline_comment_id);
+      const threadId = normalizeText(finding?.inline_thread_id);
+
+      if (threadId) {
+        try {
+          await setReviewThreadResolved({
+            token,
+            threadId,
+            resolved: true,
+          });
+        } catch (error) {
+          logNonFatalGithubError("resolveReviewThread", error);
+        }
+      }
+
       if (!Number.isInteger(commentId) || commentId <= 0) continue;
       const reviewerLabel = normalizeText(labelsByReviewerId.get(finding.reviewer) || finding.reviewer || "Reviewer");
       const body = `${buildInlineCommentBody({
@@ -384,6 +442,20 @@ export async function runConsensus({
       const findingId = normalizeText(entry?.finding?.id).toUpperCase();
       const finding = findingById.get(findingId);
       const commentId = Number(finding?.inline_comment_id);
+      const threadId = normalizeText(finding?.inline_thread_id);
+
+      if (threadId) {
+        try {
+          await setReviewThreadResolved({
+            token,
+            threadId,
+            resolved: false,
+          });
+        } catch (error) {
+          logNonFatalGithubError("unresolveReviewThread", error);
+        }
+      }
+
       if (!Number.isInteger(commentId) || commentId <= 0) continue;
       const reviewerLabel = normalizeText(labelsByReviewerId.get(finding.reviewer) || finding.reviewer || "Reviewer");
       const body = buildInlineCommentBody({
