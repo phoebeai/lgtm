@@ -5,15 +5,15 @@
 --
 -- Multiple independent AI reviewers examine changed files in a PR,
 -- produce structured lifecycle updates, and a merge step updates a
--- findings ledger. Comments are presentation only and no longer drive
--- gate logic. Line-bound findings are rendered as inline comments,
--- while all findings appear in the sticky summary comment.
+-- findings ledger. The ledger is the single source of truth for
+-- gate decisions. Inline comments and sticky summaries mirror
+-- ledger state but do not drive gate logic.
 --
 -- Scope: Full review lifecycle from PR event through gate enforcement
 -- Includes: Trusted config loading, prior ledger restore, reviewer
 --           orchestration via Codex, reviewer output normalization,
---           ledger merge, inline/sticky comment publishing,
---           human-approval bypass, gate enforcement
+--           ledger merge with resolution trust, inline comment
+--           lifecycle sync, sticky summary, gate enforcement
 -- Excludes:
 --   - CI platform workflow wiring (GitHub Actions step orchestration)
 --   - Artifact upload mechanics
@@ -29,7 +29,6 @@ enum Outcome { pass | fail }
 
 enum OutcomeReason {
     PASS_NO_FINDINGS |
-    PASS_HUMAN_BYPASS |
     FAIL_OPEN_FINDINGS |
     FAIL_REVIEWER_ERRORS
 }
@@ -60,13 +59,14 @@ value ConfigDefaults {
 }
 
 -- Finding IDs use a prefix derived from the reviewer id plus a
--- monotonic sequence number: {PREFIX}-{N}.
+-- zero-padded monotonic sequence number: {PREFIX}{NNN}.
 -- Known prefixes: security→SEC, test_quality→TQ, code_quality→CQ,
 -- infrastructure→INF. Unknown reviewer ids derive a prefix from
 -- word initials or the first three characters.
+-- Examples: SEC001, TQ002, CQ003, INF001.
 
 value LedgerFinding {
-    id: String                    -- e.g. SEC-3, TQ-1, CQ-2
+    id: String                    -- e.g. SEC001, TQ002, CQ003
     reviewer: String              -- reviewer id
     status: FindingStatus
     title: String
@@ -74,15 +74,18 @@ value LedgerFinding {
     line: Integer?
     recommendation: String
     created_run_id: String
-    created_at: String
+    created_at: Timestamp
     updated_run_id: String
-    updated_at: String
-    resolved_at: String?
+    updated_at: Timestamp
+    resolved_at: Timestamp?
 
     -- presentation linkage (comment lifecycle; non-gating)
     inline_comment_id: Integer?
-    inline_comment_url: String
-    inline_thread_id: String
+    inline_comment_url: String?
+    inline_thread_id: String?
+
+    -- derived
+    is_line_bound: file != null and line != null
 }
 
 ------------------------------------------------------------
@@ -109,6 +112,10 @@ entity ReviewerReport {
 entity FindingsLedger {
     version: Integer             -- currently 1
     findings: List<LedgerFinding>
+
+    -- projections
+    open_findings: findings where status = open
+    resolved_findings: findings where status = resolved
 }
 
 entity ReviewRun {
@@ -120,16 +127,12 @@ entity ReviewRun {
 
     reviewers: Set<Reviewer>
     reports: List<ReviewerReport>
+    changed_files: Set<String>   -- files changed in base..head
 
     prior_ledger: FindingsLedger
     merged_ledger: FindingsLedger
 
     reviewer_errors: List<String>
-    open_findings: List<LedgerFinding>
-    resolved_findings: List<LedgerFinding>
-
-    human_bypass_approved: Boolean
-    human_bypass_approvers: List<String>
 
     outcome: Outcome
     outcome_reason: OutcomeReason
@@ -242,67 +245,180 @@ rule RunReviewers {
 --
 -- Merge behavior per completed reviewer report:
 --   1) For resolved_finding_ids: mark matching open findings as
---      resolved, but only if the finding belongs to the same reviewer.
+--      resolved, but only when resolution is trusted (see below)
+--      and the finding belongs to the same reviewer.
 --   2) For each new_finding:
---      - if reopen_finding_id matches a prior finding owned by
---        the same reviewer, reopen/update that finding id.
+--      - if reopen_finding_id matches a resolved finding owned by
+--        the same reviewer, reopen/update that finding (reusing its id).
 --      - otherwise allocate next finding id using reviewer prefix
---        (SEC-*, TQ-*, CQ-*, INF-*, ...).
+--        (SEC*, TQ*, CQ*, INF*, ...) with zero-padded number.
 --
 -- A reviewer can only resolve or reopen its own findings.
 -- Findings not mentioned remain in current state.
+--
+-- Resolution trust: a reviewer's claim that a finding is resolved
+-- is only accepted when at least one of these holds:
+--   a) The finding has an inline comment whose GitHub review thread
+--      is marked resolved.
+--   b) The finding's file is in the set of files changed by the PR.
+-- This prevents reviewers from trivially clearing findings that
+-- have not been addressed.
 
 rule MergeLedger {
-    when: ReportsReady(reports, prior_ledger)
+    when: ReportsReady(reports, prior_ledger, changed_files)
 
     let completed_reports = reports.filter(r => r.run_state = completed)
 
-    ensures: merged_ledger = merge(prior_ledger, completed_reports)
-    ensures: open_findings = merged_ledger.findings.filter(f => f.status = open)
-    ensures: resolved_findings = merged_ledger.findings.filter(f => f.status = resolved)
+    ensures:
+        for report in completed_reports:
+            -- Phase 1: Process resolutions
+            for resolved_id in report.resolved_finding_ids:
+                let finding = prior_ledger.find(resolved_id)
+                requires: finding != null
+                requires: finding.reviewer = report.reviewer.id
+                requires: finding.status = open
+                requires: is_resolution_trusted(finding, changed_files)
+
+                ensures: finding.status = resolved
+                ensures: finding.resolved_at = now
+
+            -- Phase 2: Process new findings (including reopens)
+            for new_finding in report.new_findings:
+                if new_finding.reopen_finding_id != null:
+                    let prior = prior_ledger.find(new_finding.reopen_finding_id)
+                    requires: prior != null
+                    requires: prior.reviewer = report.reviewer.id
+                    requires: prior.status = resolved
+
+                    ensures: prior.status = open
+                    ensures: prior.title = new_finding.title
+                    ensures: prior.recommendation = new_finding.recommendation
+                    ensures: prior.file = new_finding.file
+                    ensures: prior.line = new_finding.line
+                    ensures: prior.resolved_at = null
+                else:
+                    ensures: LedgerFinding.created(
+                        id: next_finding_id(report.reviewer.id),
+                        reviewer: report.reviewer.id,
+                        status: open,
+                        title: new_finding.title,
+                        file: new_finding.file,
+                        line: new_finding.line,
+                        recommendation: new_finding.recommendation
+                    )
 }
 
 ------------------------------------------------------------
--- Rules: Comment Lifecycle (Presentation Only)
+-- Rules: Inline Comment Lifecycle (Presentation Only)
 ------------------------------------------------------------
 
--- Comments are no longer a source of truth for gate decisions.
--- They mirror ledger transitions:
---   - post inline comments only for newly opened line-bound findings
---   - resolve thread on finding resolution
---   - unresolve thread on finding reopen
+-- Inline comments mirror ledger transitions. All GitHub API calls
+-- in this section are non-fatal: errors are logged but the run
+-- continues and the gate decision is unaffected.
 
-rule SyncInlineCommentLifecycle {
-    when: merged_ledger != null
+-- Post new inline PR review comments for newly opened findings
+-- that have both file and line (line-bound). Reopened findings
+-- that already have an inline_comment_id reuse their existing
+-- comment rather than posting a new one.
+
+rule PostInlineComments {
+    when: LedgerMerged(merged_ledger, newly_opened_entries)
 
     ensures:
-        post_inline_comments_for_new_line_bound_findings(merged_ledger)
-        resolve_threads_for_newly_resolved_findings(merged_ledger)
-        unresolve_threads_for_reopened_findings(merged_ledger)
+        for entry in newly_opened_entries:
+            if entry.is_line_bound and entry.inline_comment_id = null:
+                InlineComment.created(
+                    finding: entry,
+                    file: entry.file,
+                    line: entry.line
+                )
 }
+
+-- When a finding is resolved, resolve its GitHub review thread
+-- and update the comment body with a resolved status suffix.
+
+rule ResolveInlineThreads {
+    when: LedgerMerged(merged_ledger, newly_resolved_entries)
+
+    ensures:
+        for entry in newly_resolved_entries:
+            if entry.inline_thread_id != null:
+                ThreadResolved(thread_id: entry.inline_thread_id)
+                InlineCommentUpdated(
+                    comment_id: entry.inline_comment_id,
+                    status_suffix: resolved
+                )
+}
+
+-- When a finding is reopened, unresolve its GitHub review thread
+-- and remove the resolved status suffix from the comment body.
+
+rule UnresolveInlineThreads {
+    when: LedgerMerged(merged_ledger, reopened_entries)
+
+    ensures:
+        for entry in reopened_entries:
+            if entry.inline_thread_id != null:
+                ThreadUnresolved(thread_id: entry.inline_thread_id)
+                InlineCommentUpdated(
+                    comment_id: entry.inline_comment_id,
+                    status_suffix: null
+                )
+}
+
+-- Thread ID backfill: findings with an inline_comment_id but no
+-- inline_thread_id query GitHub to discover and persist the thread ID.
+-- This self-heals historical findings created before thread tracking.
+
+rule BackfillThreadIds {
+    when: LedgerMerged(merged_ledger)
+
+    ensures:
+        for finding in merged_ledger.findings:
+            if finding.inline_comment_id != null and finding.inline_thread_id = null:
+                finding.inline_thread_id = lookup_thread_id(finding.inline_comment_id)
+}
+
+-- Stale thread reconciliation: after processing lifecycle transitions,
+-- compare every finding's ledger status against its GitHub thread state.
+-- If they disagree, correct the thread to match the ledger.
+-- This self-heals any historical drift between ledger and GitHub.
+
+rule ReconcileStaleThreads {
+    when: LedgerMerged(merged_ledger)
+
+    ensures:
+        for finding in merged_ledger.findings:
+            if finding.inline_comment_id != null and finding.inline_thread_id != null:
+                let should_be_resolved = finding.status = resolved
+                let github_is_resolved = thread_is_resolved(finding.inline_thread_id)
+                if should_be_resolved != github_is_resolved:
+                    if should_be_resolved:
+                        ThreadResolved(thread_id: finding.inline_thread_id)
+                    else:
+                        ThreadUnresolved(thread_id: finding.inline_thread_id)
+}
+
+------------------------------------------------------------
+-- Rules: Sticky Summary
+------------------------------------------------------------
 
 rule UpsertStickySummary {
     when: merged_ledger != null
 
     ensures:
         sticky_comment_contains(
-            marker: "<!-- codex-lgtm -->",
+            marker: "<!-- lgtm-sticky-comment -->",
             outcome_banner: outcome,
-            human_bypass_section: human_bypass,
             reviewer_errors_section: reviewer_errors,
-            open_findings_section: open_findings,
-            resolved_findings_section: resolved_findings
+            open_findings_section: merged_ledger.open_findings,
+            resolved_findings_section: merged_ledger.resolved_findings
         )
 }
 
 ------------------------------------------------------------
--- Rules: Human Bypass + Gate
+-- Rules: Gate
 ------------------------------------------------------------
-
--- Human bypass:
---   Any non-bot APPROVED review on the current head SHA counts.
---   Stale and dismissed approvals are excluded.
---   Bypass overrides reviewer errors and open findings.
 
 rule ComputeOutcome {
     when: merged_ledger != null
@@ -311,20 +427,11 @@ rule ComputeOutcome {
         .filter(r => r.run_state = error)
         .map(r => r.reviewer.id + ": reviewer execution/output error")
 
-    let bypass = github_has_human_approval_on_head(
-        repository,
-        pull_request_number,
-        head_sha
-    )
-
     ensures:
-        if bypass = true:
-            outcome = pass
-            outcome_reason = PASS_HUMAN_BYPASS
-        else if reviewer_errors.count > 0:
+        if reviewer_errors.count > 0:
             outcome = fail
             outcome_reason = FAIL_REVIEWER_ERRORS
-        else if open_findings.count > 0:
+        else if merged_ledger.open_findings.count > 0:
             outcome = fail
             outcome_reason = FAIL_OPEN_FINDINGS
         else:
@@ -347,6 +454,6 @@ rule PersistRunArtifacts {
         write_artifact("comment.md", sticky_comment)
         write_artifact("reports-merged.json", reports)
         write_artifact("outcome.txt", outcome)
-        write_artifact("open-findings-count.txt", open_findings.count)
+        write_artifact("open-findings-count.txt", merged_ledger.open_findings.count)
         write_artifact("reviewer-errors-count.txt", reviewer_errors.count)
 }

@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 
 import { formatFindingHeadline, formatFindingRecommendation } from "./finding-format.mjs";
-
-const REVIEWER_ID_PATTERN = /^[a-z0-9_]+$/;
-
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+import { parseReviewersForConsensus } from "./reviewers-json.mjs";
 
 function sanitizeInline(value) {
   return String(value ?? "")
@@ -36,11 +31,9 @@ function formatFinding(entry, labelsByReviewerId) {
   const recommendation = formatFindingRecommendation(finding);
   const location = findingLocation(finding);
   const locationText = location ? `\`${location}\`` : "`global / unknown location`";
-  const statusText = sanitizeInline(entry?.status || "open");
 
   return [
     `- ${headline}`,
-    `  Status: ${statusText}`,
     `  Location: ${locationText}`,
     `  ${recommendation}`,
   ].join("\n");
@@ -98,74 +91,7 @@ function renderOutcomeSummary({ outcomeReason, openFindingsCount, reviewerErrors
 }
 
 export function normalizeReviewers(reviewersJson) {
-  let parsed;
-  try {
-    parsed = JSON.parse(String(reviewersJson || "[]"));
-  } catch (error) {
-    throw new Error(`Invalid REVIEWERS_JSON: ${error.message}`);
-  }
-
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("REVIEWERS_JSON must contain at least one reviewer");
-  }
-
-  const ids = new Set();
-  return parsed.map((entry, index) => {
-    if (!isPlainObject(entry)) {
-      throw new Error(`REVIEWERS_JSON[${index}] must be an object`);
-    }
-
-    const id = String(entry.id || "").trim();
-    if (!REVIEWER_ID_PATTERN.test(id)) {
-      throw new Error(`REVIEWERS_JSON[${index}].id must match ^[a-z0-9_]+$`);
-    }
-    if (ids.has(id)) {
-      throw new Error(`Duplicate reviewer id in REVIEWERS_JSON: ${id}`);
-    }
-    ids.add(id);
-
-    const displayName = String(entry.display_name || id).trim() || id;
-    return {
-      id,
-      display_name: displayName,
-    };
-  });
-}
-
-export function collectNewFindingsForReviewers({ reports, reviewers }) {
-  const allFindings = [];
-  for (const reviewer of reviewers) {
-    const report = reports[reviewer.id];
-    if (!report || report.run_state !== "completed") {
-      continue;
-    }
-
-    for (const finding of report.new_findings || []) {
-      allFindings.push({
-        reviewer: reviewer.id,
-        finding,
-      });
-    }
-  }
-
-  allFindings.sort((a, b) => {
-    const titleCompare = String(a.finding?.title || "").localeCompare(
-      String(b.finding?.title || ""),
-    );
-    if (titleCompare !== 0) return titleCompare;
-
-    const reviewerCompare = String(a.reviewer || "").localeCompare(String(b.reviewer || ""));
-    if (reviewerCompare !== 0) return reviewerCompare;
-
-    const fileCompare = String(a.finding?.file || "").localeCompare(String(b.finding?.file || ""));
-    if (fileCompare !== 0) return fileCompare;
-
-    return (a.finding?.line || 0) - (b.finding?.line || 0);
-  });
-
-  return {
-    allFindings,
-  };
+  return parseReviewersForConsensus(reviewersJson);
 }
 
 export function renderConsensusComment({

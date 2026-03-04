@@ -9,10 +9,17 @@ function readWorkflow() {
   return fs.readFileSync(WORKFLOW_PATH, "utf8");
 }
 
-test("workflow is reusable via workflow_call with required openai_api_key", () => {
+test("workflow is reusable via workflow_call with required OpenAI and GitHub App secrets", () => {
   const workflow = readWorkflow();
   assert.match(workflow, /on:\s*\n\s*workflow_call:/);
   assert.match(workflow, /secrets:\s*[\s\S]*?openai_api_key:[\s\S]*?required:\s*true/);
+  assert.match(workflow, /secrets:\s*[\s\S]*?github_app_id:[\s\S]*?required:\s*true/);
+  assert.match(workflow, /secrets:\s*[\s\S]*?github_app_private_key:[\s\S]*?required:\s*true/);
+  assert.match(workflow, /Create GitHub App installation token/);
+  assert.match(
+    workflow,
+    /Find prior ledger artifact run[\s\S]*?GITHUB_TOKEN:\s*\$\{\{\s*steps\.app_token\.outputs\.token\s*\}\}/,
+  );
 });
 
 test("workflow accepts optional pull_request_number for workflow_dispatch callers", () => {

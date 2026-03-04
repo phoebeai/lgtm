@@ -2,12 +2,18 @@
 
 Use these when iterating on LGTM failures.
 
-## Latest LGTM run for current branch
+## Latest run with LGTM artifact for current branch
 
 ```bash
-gh run list --workflow LGTM --branch "$(git branch --show-current)" --event pull_request --limit 5 \
-  --json databaseId,status,conclusion,url \
-  --jq '.[] | "\(.databaseId)\t\(.status)/\(.conclusion)\t\(.url)"'
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+BRANCH="$(git branch --show-current)"
+for RUN_ID in $(gh run list -R "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,status --jq 'map(select(.status=="completed")) | .[].databaseId'); do
+  HAS_ARTIFACT="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[]? | select(.name == \"lgtm-$RUN_ID\" and .expired == false) | .id" 2>/dev/null || true)"
+  if [[ -n "$HAS_ARTIFACT" ]]; then
+    gh run view "$RUN_ID" -R "$REPO" --json databaseId,workflowName,event,status,conclusion,url --jq '"\(.databaseId)\t\(.workflowName)\t\(.event)\t\(.status)/\(.conclusion)\t\(.url)"'
+    break
+  fi
+done
 ```
 
 ## Download full LGTM artifact bundle
@@ -24,25 +30,52 @@ gh run download "$RUN_ID" -R "$(gh repo view --json nameWithOwner --jq .nameWith
 ```bash
 jq -r '
   to_entries[]
-  | "\(.key)\t\(.value.run_state // "unknown")\tfindings=\((.value.findings // [])|length)\terrors=\((.value.errors // [])|length)"
+  | "\(.key)\t\(.value.run_state // "unknown")\tnew=\((.value.new_findings // [])|length)\tresolved=\((.value.resolved_finding_ids // [])|length)\terrors=\((.value.errors // [])|length)"
 ' /tmp/lgtm-<run-id>/lgtm-<run-id>/reports-merged.json
 ```
 
-## Show blocking findings only
+## Show open findings only (gate-driving)
 
 ```bash
 jq -r '
-  to_entries[] as $r
-  | ($r.value.findings // [])[]?
-  | select(.blocking == true)
-  | "\($r.key)\t\(.id // "unknown-id")\t\(.severity // "info")\t\(.file // "-"):\((.line // "-"))\t\(.title // "Untitled finding")"
-' /tmp/lgtm-<run-id>/lgtm-<run-id>/reports-merged.json
+  (.findings // [])[]?
+  | select(.status == "open")
+  | "\(.reviewer)\t\(.id)\t\(.file // "-"):\((.line // "-"))\t\(.title)"
+' /tmp/lgtm-<run-id>/lgtm-<run-id>/findings-ledger.json
 ```
 
-## Pull latest sticky LGTM PR comment
+## Show resolved findings quickly
+
+```bash
+jq -r '
+  (.findings // [])[]?
+  | select(.status == "resolved")
+  | "- [\(.id)] \(.reviewer) \((.file // "-") + (if ((.line|type) == "number" and .line > 0) then ":" + (.line|tostring) else "" end))\n  \(.title)\n  Recommendation: \(.recommendation)"
+' /tmp/lgtm-<run-id>/lgtm-<run-id>/findings-ledger.json
+```
+
+## Pull recent human PR issue comments (steering)
 
 ```bash
 PR_NUMBER="$(gh pr view --json number --jq .number)"
-gh api "repos/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/issues/$PR_NUMBER/comments" \
-  --jq '[.[] | select(.body|contains("<!-- codex-lgtm -->"))][-1] | .body'
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --jq '
+  map(select((.user.login | ascii_downcase | endswith("[bot]")) | not))
+  | map(select((.body | contains("<!-- lgtm-sticky-comment -->")) | not))
+  | sort_by(.updated_at) | reverse | .[:20]
+  | .[]
+  | "- [\(.updated_at)] @\(.user.login)\n  \((.body | split("\n")[0]))\n  \(.html_url)"
+'
+```
+
+## Pull inline PR comments and replies (comment-on-comment steering)
+
+```bash
+PR_NUMBER="$(gh pr view --json number --jq .number)"
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+gh api "repos/$REPO/pulls/$PR_NUMBER/comments?per_page=100" --jq '
+  sort_by(.updated_at) | reverse | .[:40]
+  | .[]
+  | "- [\(.updated_at)] id=\(.id) reply_to=\(.in_reply_to_id // "-") @\(.user.login) \(.path // "-"):\(.line // "-")\n  \((.body | split("\n")[0]))\n  \(.html_url)"
+'
 ```

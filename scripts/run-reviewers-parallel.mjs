@@ -7,8 +7,8 @@ import { pathToFileURL } from "node:url";
 import { Codex } from "@openai/codex-sdk";
 import { buildTrustedReviewerInputs } from "./build-trusted-reviewer-inputs.mjs";
 import { processReviewerOutput } from "./normalize-reviewer-output.mjs";
-
-const REVIEWER_ID_PATTERN = /^[a-z0-9_]+$/;
+import { normalizeLedger } from "./shared/findings-ledger.mjs";
+import { parseReviewersForRunner } from "./shared/reviewers-json.mjs";
 
 function readRequiredEnv(name) {
   const value = String(process.env[name] || "").trim();
@@ -16,56 +16,6 @@ function readRequiredEnv(name) {
     throw new Error(`${name} is required`);
   }
   return value;
-}
-
-function parseReviewersJson(raw) {
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Invalid REVIEWERS_JSON: ${error.message}`);
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("REVIEWERS_JSON must contain at least one reviewer");
-  }
-
-  const seenReviewerIds = new Set();
-  return parsed.map((entry, index) => {
-    const label = `REVIEWERS_JSON[${index}]`;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error(`${label} must be an object`);
-    }
-
-    const reviewerId = String(entry.id || "").trim();
-    if (!REVIEWER_ID_PATTERN.test(reviewerId)) {
-      throw new Error(`${label}.id must match ^[a-z0-9_]+$`);
-    }
-    if (seenReviewerIds.has(reviewerId)) {
-      throw new Error(`Duplicate reviewer id in REVIEWERS_JSON: ${reviewerId}`);
-    }
-    seenReviewerIds.add(reviewerId);
-
-    const promptFile = String(entry.prompt_file || "").trim();
-    if (!promptFile) {
-      throw new Error(`${label}.prompt_file must be a non-empty string`);
-    }
-
-    const scope = String(entry.scope || "").trim();
-    if (!scope) {
-      throw new Error(`${label}.scope must be a non-empty string`);
-    }
-
-    return {
-      ...entry,
-      id: reviewerId,
-      prompt_file: promptFile,
-      scope,
-      paths_json:
-        entry.paths_json === undefined || entry.paths_json === null
-          ? "[]"
-          : String(entry.paths_json),
-    };
-  });
 }
 
 function makeEmptyLedger() {
@@ -84,18 +34,15 @@ function readPriorLedger(filePath) {
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
-  } catch {
-    return makeEmptyLedger();
+  } catch (error) {
+    throw new Error(`Invalid PRIOR_LEDGER_JSON (${normalizedPath}): ${error.message}`);
   }
 
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return makeEmptyLedger();
+  try {
+    return normalizeLedger(parsed);
+  } catch (error) {
+    throw new Error(`Invalid PRIOR_LEDGER_JSON (${normalizedPath}): ${error.message}`);
   }
-
-  return {
-    ...parsed,
-    findings: Array.isArray(parsed.findings) ? parsed.findings : [],
-  };
 }
 
 function makeRunGitForWorkspace(workspaceDir) {
@@ -283,7 +230,7 @@ export async function runReviewersParallel({
   codexBin = process.env.CODEX_BIN || "codex",
   runReviewerWithCodex = defaultRunReviewerWithCodex,
 }) {
-  const reviewers = parseReviewersJson(reviewersJson);
+  const reviewers = parseReviewersForRunner(reviewersJson);
   const timeoutMs = resolveTimeoutMs({ reviewerTimeoutMinutes, reviewerTimeoutMs });
   const runGit = makeRunGitForWorkspace(workspaceDir);
   const priorLedger = readPriorLedger(priorLedgerJsonPath);

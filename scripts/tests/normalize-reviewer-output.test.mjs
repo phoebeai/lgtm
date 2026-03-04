@@ -7,7 +7,7 @@ function buildValidRawPayload(overrides = {}) {
     reviewer: "security",
     run_state: "completed",
     summary: "No major issues.",
-    resolved_finding_ids: ["SEC-1"],
+    resolved_finding_ids: ["SEC001"],
     new_findings: [
       {
         title: "Sample finding",
@@ -33,7 +33,7 @@ test("returns normalized payload for valid reviewer JSON", () => {
 
   assert.equal(payload.reviewer, "security");
   assert.equal(payload.run_state, "completed");
-  assert.deepEqual(payload.resolved_finding_ids, ["SEC-1"]);
+  assert.deepEqual(payload.resolved_finding_ids, ["SEC001"]);
   assert.equal(payload.new_findings.length, 1);
   assert.equal(payload.new_findings[0].file, null);
   assert.equal(payload.new_findings[0].line, null);
@@ -73,7 +73,7 @@ test("normalized new_findings always include nullable file and line keys", () =>
   assert.equal(Object.hasOwn(payload.new_findings[1], "line"), true);
   assert.equal(payload.new_findings[1].file, "src/titaness/security.py");
   assert.equal(payload.new_findings[1].line, 21);
-  assert.equal(payload.new_findings[1].reopen_finding_id, "SEC-9");
+  assert.equal(payload.new_findings[1].reopen_finding_id, "SEC009");
 });
 
 test("returns error payload for invalid JSON", () => {
@@ -244,6 +244,26 @@ test("new finding without recommendation yields error payload", () => {
   assert.ok(payload.errors.some((error) => error.includes("new finding 0 missing recommendation")));
 });
 
+test("invalid finding id shapes in reviewer output yield error payload", () => {
+  const payload = processReviewerOutput({
+    reviewer: "security",
+    reviewerActive: "true",
+    rawOutput: buildValidRawPayload({
+      resolved_finding_ids: ["SEC-ABC"],
+      new_findings: [],
+    }),
+    stepOutcome: "failure",
+    stepConclusion: "failure",
+  });
+
+  assert.equal(payload.run_state, "error");
+  assert.ok(
+    payload.errors.some((error) =>
+      error.includes("resolved_finding_ids[0] must be a valid finding id"),
+    ),
+  );
+});
+
 test("transcript-style new finding fields are normalized via aliases", () => {
   const payload = processReviewerOutput({
     reviewer: "security",
@@ -271,5 +291,5 @@ test("transcript-style new finding fields are normalized via aliases", () => {
   assert.equal(payload.new_findings[0].title, "Missing canonical keys");
   assert.equal(payload.new_findings[0].recommendation, "Use description as recommendation fallback.");
   assert.equal(payload.new_findings[0].line, 222);
-  assert.deepEqual(payload.resolved_finding_ids, ["SEC-1"]);
+  assert.deepEqual(payload.resolved_finding_ids, ["SEC001"]);
 });

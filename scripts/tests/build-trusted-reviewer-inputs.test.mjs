@@ -268,7 +268,7 @@ test("buildTrustedReviewerInputs injects prior ledger entries for scoped files",
       version: 1,
       findings: [
         {
-          id: "SEC-1",
+          id: "SEC001",
           reviewer: "security",
           status: "open",
           title: "Existing issue",
@@ -305,7 +305,7 @@ test("buildTrustedReviewerInputs includes all scoped prior findings in prompt", 
   fs.writeFileSync(schemaPath, JSON.stringify({ marker: "schema" }), "utf8");
 
   const priorFindings = Array.from({ length: 25 }, (_, index) => ({
-    id: `SEC-${index + 1}`,
+    id: `SEC${String(index + 1).padStart(3, "0")}`,
     reviewer: "security",
     status: index % 2 === 0 ? "resolved" : "open",
     title: `Existing issue ${index}`,

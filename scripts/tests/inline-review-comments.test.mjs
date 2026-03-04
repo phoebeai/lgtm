@@ -8,7 +8,7 @@ import {
 
 function makeEntry({
   reviewer = "security",
-  id = "SEC-1",
+  id = "SEC001",
   title = "Issue",
   file = "src/app.ts",
   line = 12,
@@ -37,19 +37,19 @@ test("buildInlineCommentBody includes reviewer, finding id, and recommendation",
   const body = buildInlineCommentBody({
     reviewerLabel: "Security",
     finding: {
-      id: "SEC-4",
+      id: "SEC004",
       title: "SQL injection",
       recommendation: "Use parameterized queries.",
     },
   });
 
-  assert.match(body, /\*\*Security \[SEC-4\]:\*\* SQL injection/);
+  assert.match(body, /\*\*\[SEC004\]\*\* SQL injection/);
   assert.match(body, /Use parameterized queries\./);
 });
 
 test("publishInlineFindingComments posts all line-bound findings", async (t) => {
-  const first = makeEntry({ id: "SEC-1", title: "Existing finding", line: 12 });
-  const second = makeEntry({ id: "SEC-2", title: "New finding", line: 30 });
+  const first = makeEntry({ id: "SEC001", title: "Existing finding", line: 12 });
+  const second = makeEntry({ id: "SEC002", title: "New finding", line: 30 });
 
   const calls = [];
   const originalFetch = globalThis.fetch;
@@ -97,14 +97,14 @@ test("publishInlineFindingComments posts all line-bound findings", async (t) => 
   assert.equal(firstPayload.path, "src/app.ts");
   assert.equal(firstPayload.line, 12);
   assert.equal(firstPayload.side, "RIGHT");
-  assert.match(firstPayload.body, /\*\*Security \[SEC-1\]:\*\* Existing finding/);
+  assert.match(firstPayload.body, /\*\*\[SEC001\]\*\* Existing finding/);
 
   const secondPayload = JSON.parse(postCalls[1].body);
   assert.equal(secondPayload.commit_id, "abc123");
   assert.equal(secondPayload.path, "src/app.ts");
   assert.equal(secondPayload.line, 30);
   assert.equal(secondPayload.side, "RIGHT");
-  assert.match(secondPayload.body, /\*\*Security \[SEC-2\]:\*\* New finding/);
+  assert.match(secondPayload.body, /\*\*\[SEC002\]\*\* New finding/);
   assert.match(secondPayload.body, /\n\nFix this/);
 
   assert.equal(result.postedEntries[0].comment_id > 0, true);

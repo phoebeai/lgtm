@@ -13,7 +13,10 @@ Reusable GitHub Actions workflow for blocker-first pull request review with mult
 
 ## Quick Start
 
-1. Add a repository secret named `OPENAI_API_KEY`.
+1. Add repository secrets:
+   - `OPENAI_API_KEY`
+   - `LGTM_GITHUB_APP_ID`
+   - `LGTM_GITHUB_APP_PRIVATE_KEY`
 2. Add `.github/lgtm.yml`:
 
 ```yaml
@@ -65,6 +68,8 @@ jobs:
       auto_approve_no_findings: true
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}
+      github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}
 ```
 
 6. Open or update a PR.
@@ -105,21 +110,28 @@ Inputs exposed by `.github/workflows/lgtm.yml`:
 - `auto_approve_no_findings` (default `false`)
 - `pull_request_number` (used by `workflow_dispatch` callers)
 
-Required secret:
+Required secrets:
 
 - `openai_api_key`
+- `github_app_id`
+- `github_app_private_key`
 
 GitHub auth:
 
-- No extra GitHub secret is required. LGTM uses the built-in `GITHUB_TOKEN` (`github.token`).
-- Caller workflow must grant:
+- LGTM mints a GitHub App installation token inside the reusable workflow.
+- Configure App secrets in the caller as:
+  - `github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}`
+  - `github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}`
+- Install the GitHub App on the repository with at least:
+  - `Pull requests: Read and write`
+  - `Contents: Read`
+  - `Actions: Read`
+- Keep caller workflow permissions:
   - `pull-requests: write`
   - `contents: read`
   - `actions: read`
 - To allow bot approvals, enable:
   - `Settings -> Actions -> General -> Allow GitHub Actions to create and approve pull requests`
-- In repository settings, enable workflow token write permissions:
-  - `Settings -> Actions -> General -> Workflow permissions -> Read and write permissions`
 
 ## Security Model
 
@@ -131,7 +143,7 @@ GitHub auth:
 
 ## Fork PR Behavior
 
-On pull requests from forks, repository secrets are typically unavailable. If `OPENAI_API_KEY` is unavailable, this workflow cannot run reviewer execution. Recommended patterns:
+On pull requests from forks, repository secrets are typically unavailable. If `OPENAI_API_KEY` or GitHub App secrets are unavailable, this workflow cannot run reviewer execution. Recommended patterns:
 
 - run this workflow only for same-repo PRs, or
 - use an internal triage workflow for fork contributions.

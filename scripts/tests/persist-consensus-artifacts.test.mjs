@@ -20,7 +20,7 @@ test("persistConsensusArtifacts writes merged files and copies per-reviewer repo
   fs.writeFileSync(path.join(reportsDir, "security.json"), '{"reviewer":"security"}\n', "utf8");
 
   const commentPath = path.join(runnerTemp, "comment.md");
-  fs.writeFileSync(commentPath, "<!-- codex-lgtm -->\nhello\n", "utf8");
+  fs.writeFileSync(commentPath, "<!-- lgtm-sticky-comment -->\nhello\n", "utf8");
 
   const ledgerPath = path.join(runnerTemp, "findings-ledger.json");
   fs.writeFileSync(ledgerPath, '{"version":1,"findings":[]}\n', "utf8");
@@ -61,7 +61,7 @@ test("persistConsensusArtifacts writes merged files and copies per-reviewer repo
   );
   assert.equal(
     fs.readFileSync(path.join(outputDir, "comment.md"), "utf8"),
-    "<!-- codex-lgtm -->\nhello\n",
+    "<!-- lgtm-sticky-comment -->\nhello\n",
   );
   assert.equal(
     fs.readFileSync(path.join(outputDir, "findings-ledger.json"), "utf8"),

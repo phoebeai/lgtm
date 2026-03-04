@@ -45,6 +45,12 @@ test("loadPriorLedger throws when findings-ledger.json is malformed", (t) => {
   assert.throws(() => loadPriorLedger(sourceDir), /Invalid prior ledger JSON/);
 });
 
+test("loadPriorLedger throws when findings-ledger.json has invalid shape", (t) => {
+  const sourceDir = createTempDir(t, "prepare-prior-ledger-invalid-shape-");
+  fs.writeFileSync(path.join(sourceDir, "findings-ledger.json"), "[]", "utf8");
+  assert.throws(() => loadPriorLedger(sourceDir), /Invalid prior ledger format/);
+});
+
 test("loadPriorLedger loads valid findings-ledger.json from prior artifact", (t) => {
   const sourceDir = createTempDir(t, "prepare-prior-ledger-valid-");
   fs.writeFileSync(
@@ -54,7 +60,7 @@ test("loadPriorLedger loads valid findings-ledger.json from prior artifact", (t)
         version: 1,
         findings: [
           {
-            id: "SEC-1",
+            id: "SEC001",
             reviewer: "security",
             status: "open",
             title: "Issue",
@@ -74,7 +80,7 @@ test("loadPriorLedger loads valid findings-ledger.json from prior artifact", (t)
   assert.equal(result.source, "artifact");
   assert.equal(result.ledger.version, 1);
   assert.equal(result.ledger.findings.length, 1);
-  assert.equal(result.ledger.findings[0].id, "SEC-1");
+  assert.equal(result.ledger.findings[0].id, "SEC001");
 });
 
 test("prepare-prior-ledger CLI writes output path and source metadata", (t) => {
@@ -83,7 +89,7 @@ test("prepare-prior-ledger CLI writes output path and source metadata", (t) => {
   fs.mkdirSync(sourceDir, { recursive: true });
   fs.writeFileSync(
     path.join(sourceDir, "findings-ledger.json"),
-    '{"version":1,"findings":[{"id":"TQ-1","reviewer":"test_quality","status":"open","title":"x"}]}\n',
+    '{"version":1,"findings":[{"id":"TQ001","reviewer":"test_quality","status":"open","title":"x"}]}\n',
     "utf8",
   );
 
@@ -102,7 +108,7 @@ test("prepare-prior-ledger CLI writes output path and source metadata", (t) => {
   const written = JSON.parse(fs.readFileSync(outputPath, "utf8"));
   assert.equal(written.version, 1);
   assert.equal(written.findings.length, 1);
-  assert.equal(written.findings[0].id, "TQ-1");
+  assert.equal(written.findings[0].id, "TQ001");
 });
 
 test("prepare-prior-ledger CLI fails when PRIOR_LEDGER_JSON is missing", (t) => {

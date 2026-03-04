@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from "node:url";
 import { githubRequest } from "./shared/github-client.mjs";
 
 function normalizeText(value) {
@@ -34,36 +35,51 @@ function isPermissionIssue(error) {
 }
 
 async function main() {
-  const token = normalizeText(process.env.GITHUB_TOKEN || "");
-  const repo = normalizeText(process.env.GITHUB_REPOSITORY || "");
-  const prNumber = parsePullNumber(process.env.PR_NUMBER || "");
-  const expectedHeadSha = normalizeText(process.env.SHA || "");
+  await approvePrWhenClean({
+    token: process.env.GITHUB_TOKEN || "",
+    repo: process.env.GITHUB_REPOSITORY || "",
+    prNumber: process.env.PR_NUMBER || "",
+    expectedHeadSha: process.env.SHA || "",
+  });
+}
 
-  if (!token) {
+export async function approvePrWhenClean({
+  token,
+  repo,
+  prNumber,
+  expectedHeadSha,
+  request = githubRequest,
+  stderr = process.stderr,
+}) {
+  const normalizedToken = normalizeText(token || "");
+  const normalizedRepo = normalizeText(repo || "");
+  const normalizedExpectedHeadSha = normalizeText(expectedHeadSha || "");
+  const normalizedPrNumber = parsePullNumber(prNumber || "");
+  if (!normalizedToken) {
     throw new Error("GITHUB_TOKEN is required");
   }
 
-  const { owner, name } = parseRepository(repo);
-  const pull = await githubRequest({
+  const { owner, name } = parseRepository(normalizedRepo);
+  const pull = await request({
     method: "GET",
-    token,
-    url: `https://api.github.com/repos/${owner}/${name}/pulls/${prNumber}`,
+    token: normalizedToken,
+    url: `https://api.github.com/repos/${owner}/${name}/pulls/${normalizedPrNumber}`,
   });
 
   const currentHeadSha = normalizeText(pull?.head?.sha);
-  if (expectedHeadSha && currentHeadSha && expectedHeadSha !== currentHeadSha) {
-    process.stderr.write(
-      `[approve-pr-when-clean] skipped: PR head moved from ${expectedHeadSha} to ${currentHeadSha}\n`,
+  if (normalizedExpectedHeadSha && currentHeadSha && normalizedExpectedHeadSha !== currentHeadSha) {
+    stderr.write(
+      `[approve-pr-when-clean] skipped: PR head moved from ${normalizedExpectedHeadSha} to ${currentHeadSha}\n`,
     );
     return;
   }
 
   const body = "LGTM automation: no open findings in the latest run.";
   try {
-    await githubRequest({
+    await request({
       method: "POST",
-      token,
-      url: `https://api.github.com/repos/${owner}/${name}/pulls/${prNumber}/reviews`,
+      token: normalizedToken,
+      url: `https://api.github.com/repos/${owner}/${name}/pulls/${normalizedPrNumber}/reviews`,
       body: {
         event: "APPROVE",
         body,
@@ -71,7 +87,7 @@ async function main() {
     });
   } catch (error) {
     if (isPermissionIssue(error)) {
-      process.stderr.write(
+      stderr.write(
         `[approve-pr-when-clean] non-fatal: unable to auto-approve (${normalizeText(error?.message)})\n`,
       );
       return;
@@ -80,7 +96,14 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+function isCliMain() {
+  if (!process.argv[1]) return false;
+  return import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isCliMain()) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

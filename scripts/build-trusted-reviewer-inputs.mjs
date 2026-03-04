@@ -11,7 +11,7 @@ import {
   requireEnv,
 } from "./shared/git-trusted-read.mjs";
 import { writeGithubOutput } from "./shared/github-output.mjs";
-import { isValidReviewerId } from "./shared/reviewer-core.mjs";
+import { isValidReviewerId, normalizeFindingId } from "./shared/reviewer-core.mjs";
 
 const UNSAFE_PROMPT_PATH_PATTERN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u;
 
@@ -79,7 +79,7 @@ function normalizePriorLedgerEntries(value) {
     .map((entry) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
       const reviewerValue = String(entry.reviewer || "").trim();
-      const idValue = String(entry.id || "").trim().toUpperCase();
+      const idValue = normalizeFindingId(entry.id);
       const titleValue = String(entry.title || "").replace(/\s+/g, " ").trim();
       const recommendationValue = String(entry.recommendation || "").replace(/\s+/g, " ").trim();
       const fileValue = String(entry.file || "").trim();
@@ -219,6 +219,7 @@ export function buildTrustedReviewerInputs({
       ...(priorFindingsForScope.length > 0
         ? priorFindingsForScope.map((entry) => `- ${JSON.stringify(entry)}`)
         : ["- []"]),
+      "When referencing finding ids, use canonical format like SEC001 or TQ007.",
       "Use resolved_finding_ids for findings that are now fixed.",
       "For findings that still exist, do not include them in new_findings.",
       "For findings that reappear after being resolved, include them in new_findings with reopen_finding_id set.",

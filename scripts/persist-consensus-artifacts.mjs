@@ -3,27 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-
-function parseReviewers(reviewersJson) {
-  let parsed;
-  try {
-    parsed = JSON.parse(String(reviewersJson || "[]"));
-  } catch (error) {
-    throw new Error(`Invalid REVIEWERS_JSON: ${error.message}`);
-  }
-
-  if (!Array.isArray(parsed)) {
-    throw new Error("REVIEWERS_JSON must be a JSON array");
-  }
-
-  return parsed.map((entry, index) => {
-    const reviewerId = String(entry?.id || "").trim();
-    if (!reviewerId) {
-      throw new Error(`REVIEWERS_JSON[${index}].id must be a non-empty string`);
-    }
-    return reviewerId;
-  });
-}
+import { parseReviewerIds } from "./shared/reviewers-json.mjs";
 
 function writeTextFile(filePath, value) {
   const normalized = String(value ?? "");
@@ -62,7 +42,7 @@ export function persistConsensusArtifacts({
     throw new Error("LEDGER_PATH is required");
   }
 
-  const reviewerIds = parseReviewers(reviewersJson);
+  const reviewerIds = parseReviewerIds(reviewersJson);
   const sourceReportsDir = path.join(normalizedRunnerTemp, "lgtm-reports");
   const targetDir = path.join(normalizedRunnerTemp, "lgtm");
   fs.mkdirSync(targetDir, { recursive: true });

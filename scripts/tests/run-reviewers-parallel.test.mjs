@@ -369,7 +369,7 @@ test("runReviewersParallel injects prior ledger entries into reviewer prompts", 
       version: 1,
       findings: [
         {
-          id: "SEC-1",
+          id: "SEC001",
           reviewer: "security",
           status: "resolved",
           title: "Existing issue",
@@ -402,4 +402,50 @@ test("runReviewersParallel injects prior ledger entries into reviewer prompts", 
   );
   assert.match(capturedPrompt, /Existing issue/);
   assert.match(capturedPrompt, /Do not duplicate already-open findings in new_findings/);
+});
+
+test("runReviewersParallel fails when PRIOR_LEDGER_JSON is malformed", async (t) => {
+  const { repoDir, baseSha, headSha, schemaPath } = setupReviewRepo(t);
+  const promptsDir = fs.mkdtempSync(path.join(repoDir, "tmp-prompts-"));
+  const reportsDir = fs.mkdtempSync(path.join(repoDir, "tmp-reports-"));
+  const priorLedgerPath = path.join(repoDir, "prior-ledger.json");
+  fs.writeFileSync(priorLedgerPath, "{not-json", "utf8");
+
+  await assert.rejects(
+    runReviewersParallel({
+      baseSha,
+      headSha,
+      prNumber: "13",
+      repository: "phoebeai/lgtm",
+      reviewersJson: JSON.stringify([
+        {
+          id: "security",
+          scope: "security risk",
+          prompt_file: ".github/lgtm/prompts/security.md",
+          paths_json: "[]",
+        },
+      ]),
+      resolvedModel: "gpt-5.3-codex",
+      resolvedEffort: "medium",
+      schemaFile: schemaPath,
+      promptsDir,
+      reportsDir,
+      reviewerTimeoutMinutes: "1",
+      priorLedgerJsonPath: priorLedgerPath,
+      workspaceDir: repoDir,
+      runReviewerWithCodex: async () => ({
+        rawOutput: JSON.stringify({
+          reviewer: "security",
+          summary: "ok",
+          resolved_finding_ids: [],
+          new_findings: [],
+          errors: [],
+        }),
+        outcome: "success",
+        conclusion: "success",
+        error: "",
+      }),
+    }),
+    /Invalid PRIOR_LEDGER_JSON/,
+  );
 });

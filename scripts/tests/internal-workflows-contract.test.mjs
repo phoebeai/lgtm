@@ -45,6 +45,9 @@ test("dogfood workflow calls reusable workflow with gate and auto-approval setti
   assert.equal(job.with.enforce_gate, true);
   assert.equal(job.with.auto_approve_no_findings, true);
   assert.match(String(job.if), /head\.repo\.full_name == github\.repository/);
+  assert.equal(job.secrets.openai_api_key, "${{ secrets.OPENAI_API_KEY }}");
+  assert.equal(job.secrets.github_app_id, "${{ secrets.LGTM_GITHUB_APP_ID }}");
+  assert.equal(job.secrets.github_app_private_key, "${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}");
 });
 
 test("reusable lgtm workflow runs as a single LGTM job", () => {
@@ -117,6 +120,12 @@ test("smoke-consumer workflow pins reusable workflow to v1 and grants required p
   assert.equal(workflow.permissions?.["pull-requests"], "write");
   assert.equal(workflow.permissions?.actions, "read");
   assert.equal(workflow.jobs?.lgtm?.with?.auto_approve_no_findings, true);
+  assert.equal(workflow.jobs?.lgtm?.secrets?.openai_api_key, "${{ secrets.OPENAI_API_KEY }}");
+  assert.equal(workflow.jobs?.lgtm?.secrets?.github_app_id, "${{ secrets.LGTM_GITHUB_APP_ID }}");
+  assert.equal(
+    workflow.jobs?.lgtm?.secrets?.github_app_private_key,
+    "${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}",
+  );
   assert.deepEqual(workflow.on?.pull_request?.types, ["opened", "reopened", "synchronize", "ready_for_review"]);
 });
 

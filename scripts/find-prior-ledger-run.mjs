@@ -2,6 +2,7 @@
 
 import { pathToFileURL } from "node:url";
 import { writeGithubOutput } from "./shared/github-output.mjs";
+import { githubRequest } from "./shared/github-client.mjs";
 
 function normalizeText(value) {
   return String(value ?? "").trim();
@@ -39,45 +40,38 @@ function parseOptionalRunId(value) {
   return parsed;
 }
 
-async function githubGet({ token, url }) {
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "User-Agent": "phoebe-lgtm",
-    },
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GET ${url} failed (${response.status}): ${text}`);
-  }
-
-  return response.json();
-}
-
 function runBelongsToPullRequest(run, pullNumber) {
   const pullRequests = Array.isArray(run?.pull_requests) ? run.pull_requests : [];
   return pullRequests.some((pullRequest) => Number(pullRequest?.number) === pullNumber);
 }
 
-async function findPriorLedgerRun({ token, repo, prNumber, currentRunId }) {
+function parseMaxPages(value) {
+  const parsed = Number.parseInt(normalizeText(value), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return 100;
+  }
+  return parsed;
+}
+
+async function findPriorLedgerRun({ token, repo, prNumber, currentRunId, maxPages = 100 }) {
   const { owner, name } = parseRepository(repo);
   const normalizedPrNumber = parsePullNumber(prNumber);
   const normalizedCurrentRunId = parseRunId(currentRunId);
-  const currentRun = await githubGet({
+  const normalizedMaxPages = parseMaxPages(maxPages);
+  const currentRun = await githubRequest({
+    method: "GET",
     token,
     url: `https://api.github.com/repos/${owner}/${name}/actions/runs/${normalizedCurrentRunId}`,
   });
   const currentWorkflowId = parseOptionalRunId(currentRun?.workflow_id);
 
-  for (let page = 1; page <= 5; page += 1) {
+  for (let page = 1; page <= normalizedMaxPages; page += 1) {
     const runsUrl = currentWorkflowId
       ? `https://api.github.com/repos/${owner}/${name}/actions/workflows/${currentWorkflowId}/runs?status=completed&per_page=100&page=${page}`
       : `https://api.github.com/repos/${owner}/${name}/actions/runs?status=completed&per_page=100&page=${page}`;
 
-    const runsPayload = await githubGet({
+    const runsPayload = await githubRequest({
+      method: "GET",
       token,
       url: runsUrl,
     });
@@ -107,7 +101,8 @@ async function findPriorLedgerRun({ token, repo, prNumber, currentRunId }) {
       }
 
       const expectedArtifactName = `lgtm-${runId}`;
-      const artifactsPayload = await githubGet({
+      const artifactsPayload = await githubRequest({
+        method: "GET",
         token,
         url: `https://api.github.com/repos/${owner}/${name}/actions/runs/${runId}/artifacts?per_page=100`,
       });
@@ -143,6 +138,7 @@ async function main() {
     repo: process.env.GITHUB_REPOSITORY,
     prNumber: process.env.PR_NUMBER,
     currentRunId: process.env.GITHUB_RUN_ID,
+    maxPages: process.env.PRIOR_LEDGER_MAX_PAGES,
   });
 
   writeGithubOutput("prior_run_id", result.prior_run_id);

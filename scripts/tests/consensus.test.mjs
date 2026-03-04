@@ -5,7 +5,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { runConsensus } from "../consensus.mjs";
 import { renderConsensusComment } from "../shared/consensus-renderer.mjs";
-import { parseGithubOutput } from "./test-utils.mjs";
+import {
+  commitAll,
+  createRepo,
+  parseGithubOutput,
+  writeRepoFile,
+} from "./test-utils.mjs";
 
 function createTempDir(t, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -31,6 +36,21 @@ function baseReport(overrides = {}) {
   };
 }
 
+function createWorkspaceWithFileChange({
+  t,
+  relativePath,
+  baseContents,
+  headContents,
+  prefix = "consensus-workspace-",
+}) {
+  const workspaceDir = createRepo(t, prefix);
+  writeRepoFile(workspaceDir, relativePath, baseContents);
+  const baseSha = commitAll(workspaceDir, "base");
+  writeRepoFile(workspaceDir, relativePath, headContents);
+  const headSha = commitAll(workspaceDir, "head");
+  return { workspaceDir, baseSha, headSha };
+}
+
 test("renderConsensusComment includes open and resolved sections", () => {
   const comment = renderConsensusComment({
     marker: "<!-- marker -->",
@@ -41,7 +61,7 @@ test("renderConsensusComment includes open and resolved sections", () => {
         reviewer: "security",
         status: "open",
         finding: {
-          id: "SEC-1",
+          id: "SEC001",
           title: "Critical issue",
           recommendation: "Fix now",
           file: "src/app.ts",
@@ -54,7 +74,7 @@ test("renderConsensusComment includes open and resolved sections", () => {
         reviewer: "security",
         status: "resolved",
         finding: {
-          id: "SEC-2",
+          id: "SEC002",
           title: "Old issue",
           recommendation: "Already fixed",
           file: "src/app.ts",
@@ -70,9 +90,10 @@ test("renderConsensusComment includes open and resolved sections", () => {
   assert.match(comment, /1 open finding detected\./);
   assert.match(comment, /### Reviewer Errors/);
   assert.match(comment, /### Open Findings/);
-  assert.match(comment, /\*\*Security \[SEC-1\]:\*\* Critical issue/);
+  assert.match(comment, /\*\*\[SEC001\]\*\* Critical issue/);
   assert.match(comment, /### Resolved Findings/);
-  assert.match(comment, /\*\*Security \[SEC-2\]:\*\* Old issue/);
+  assert.match(comment, /\*\*\[SEC002\]\*\* Old issue/);
+  assert.doesNotMatch(comment, /Status: (open|resolved)/i);
 });
 
 test("runConsensus writes comment, ledger, and outputs for PASS_NO_FINDINGS", async (t) => {
@@ -183,23 +204,30 @@ test("runConsensus fails with open findings and assigns reviewer-prefixed findin
 
   const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
   assert.equal(ledger.findings.length, 1);
-  assert.equal(ledger.findings[0].id, "SEC-1");
+  assert.equal(ledger.findings[0].id, "SEC001");
   assert.equal(ledger.findings[0].status, "open");
 
   const comment = fs.readFileSync(commentPath, "utf8");
-  assert.match(comment, /\*\*Security \[SEC-1\]:\*\* SQL injection/);
+  assert.match(comment, /\*\*\[SEC001\]\*\* SQL injection/);
 });
 
 test("runConsensus resolves prior open findings and keeps history in resolved section", async (t) => {
   const tempDir = createTempDir(t, "consensus-resolved-");
   const reportsDir = path.join(tempDir, "reports");
   fs.mkdirSync(reportsDir, { recursive: true });
+  const { workspaceDir, baseSha, headSha } = createWorkspaceWithFileChange({
+    t,
+    relativePath: "src/a.ts",
+    baseContents: "export const value = 1;\n",
+    headContents: "export const value = 2;\n",
+    prefix: "consensus-resolved-workspace-",
+  });
 
   writeReport(
     reportsDir,
     "security",
     baseReport({
-      resolved_finding_ids: ["SEC-1"],
+      resolved_finding_ids: ["SEC001"],
       new_findings: [],
     }),
   );
@@ -212,7 +240,7 @@ test("runConsensus resolves prior open findings and keeps history in resolved se
         version: 1,
         findings: [
           {
-            id: "SEC-1",
+            id: "SEC001",
             reviewer: "security",
             status: "open",
             title: "Existing blocker",
@@ -232,7 +260,9 @@ test("runConsensus resolves prior open findings and keeps history in resolved se
   const ledgerPath = path.join(tempDir, "ledger.json");
   const result = await runConsensus({
     runId: "102",
-    sha: "abc123",
+    baseSha,
+    sha: headSha,
+    workspaceDir,
     commentPath,
     ledgerPath,
     token: "",
@@ -254,12 +284,12 @@ test("runConsensus resolves prior open findings and keeps history in resolved se
 
   const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
   assert.equal(ledger.findings.length, 1);
-  assert.equal(ledger.findings[0].id, "SEC-1");
+  assert.equal(ledger.findings[0].id, "SEC001");
   assert.equal(ledger.findings[0].status, "resolved");
 
   const comment = fs.readFileSync(commentPath, "utf8");
   assert.match(comment, /### Resolved Findings/);
-  assert.match(comment, /\*\*Security \[SEC-1\]:\*\* Existing blocker/);
+  assert.match(comment, /\*\*\[SEC001\]\*\* Existing blocker/);
 });
 
 test("runConsensus reopens resolved findings with reopen_finding_id using same finding id", async (t) => {
@@ -277,7 +307,7 @@ test("runConsensus reopens resolved findings with reopen_finding_id using same f
           file: "src/a.ts",
           line: 12,
           recommendation: "Fix it again",
-          reopen_finding_id: "SEC-3",
+          reopen_finding_id: "SEC003",
         },
       ],
     }),
@@ -291,7 +321,7 @@ test("runConsensus reopens resolved findings with reopen_finding_id using same f
         version: 1,
         findings: [
           {
-            id: "SEC-3",
+            id: "SEC003",
             reviewer: "security",
             status: "resolved",
             title: "Existing blocker",
@@ -334,7 +364,7 @@ test("runConsensus reopens resolved findings with reopen_finding_id using same f
 
   const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
   assert.equal(ledger.findings.length, 1);
-  assert.equal(ledger.findings[0].id, "SEC-3");
+  assert.equal(ledger.findings[0].id, "SEC003");
   assert.equal(ledger.findings[0].status, "open");
   assert.equal(ledger.findings[0].title, "Existing blocker (reopened)");
 });
@@ -419,19 +449,26 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
   const tempDir = createTempDir(t, "consensus-inline-lifecycle-");
   const reportsDir = path.join(tempDir, "reports");
   fs.mkdirSync(reportsDir, { recursive: true });
+  const { workspaceDir, baseSha, headSha } = createWorkspaceWithFileChange({
+    t,
+    relativePath: "src/old.ts",
+    baseContents: "export const oldValue = 1;\n",
+    headContents: "export const oldValue = 2;\n",
+    prefix: "consensus-inline-lifecycle-workspace-",
+  });
 
   writeReport(
     reportsDir,
     "security",
     baseReport({
-      resolved_finding_ids: ["SEC-1"],
+      resolved_finding_ids: ["SEC001"],
       new_findings: [
         {
           title: "Reopened issue",
           file: "src/reopen.ts",
           line: 22,
           recommendation: "Re-fix",
-          reopen_finding_id: "SEC-2",
+          reopen_finding_id: "SEC002",
         },
         {
           title: "New issue",
@@ -452,7 +489,7 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
         version: 1,
         findings: [
           {
-            id: "SEC-1",
+            id: "SEC001",
             reviewer: "security",
             status: "open",
             title: "Old open issue",
@@ -463,7 +500,7 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
             inline_thread_id: "thread-resolve",
           },
           {
-            id: "SEC-2",
+            id: "SEC002",
             reviewer: "security",
             status: "resolved",
             title: "Previously resolved issue",
@@ -530,6 +567,27 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
       const payload = JSON.parse(String(options.body || "{}"));
       const query = String(payload.query || "");
       const threadId = String(payload?.variables?.threadId || "");
+
+      if (query.includes("PullRequestReviewThreads")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [],
+                  },
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
 
       if (query.includes("ResolveReviewThread")) {
         threadMutations.push({ action: "resolve", threadId });
@@ -599,7 +657,9 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
   const ledgerPath = path.join(tempDir, "ledger.json");
   const result = await runConsensus({
     runId: "105",
-    sha: "abc999",
+    baseSha,
+    sha: headSha,
+    workspaceDir,
     commentPath,
     ledgerPath,
     token: "token",
@@ -629,7 +689,10 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
   );
   const resolvedPatch = patchedInlineComments.find((entry) => entry.commentId === 401);
   const reopenedPatch = patchedInlineComments.find((entry) => entry.commentId === 402);
-  assert.match(resolvedPatch.body, /Status: Resolved in latest run\./);
+  assert.match(
+    resolvedPatch.body,
+    new RegExp(`Status: Resolved in ${headSha.slice(0, 7)}\\.`),
+  );
   assert.doesNotMatch(reopenedPatch.body, /Status: Resolved in latest run\./);
   assert.deepEqual(threadMutations, [
     {
@@ -643,9 +706,9 @@ test("runConsensus updates existing inline comments for resolved/reopened findin
   ]);
 
   const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
-  const sec1 = ledger.findings.find((finding) => finding.id === "SEC-1");
-  const sec2 = ledger.findings.find((finding) => finding.id === "SEC-2");
-  const sec3 = ledger.findings.find((finding) => finding.id === "SEC-3");
+  const sec1 = ledger.findings.find((finding) => finding.id === "SEC001");
+  const sec2 = ledger.findings.find((finding) => finding.id === "SEC002");
+  const sec3 = ledger.findings.find((finding) => finding.id === "SEC003");
   assert.equal(sec1.status, "resolved");
   assert.equal(sec1.inline_comment_id, 401);
   assert.equal(sec1.inline_thread_id, "thread-resolve");
@@ -660,12 +723,19 @@ test("runConsensus tolerates non-fatal inline comment update API errors", async 
   const tempDir = createTempDir(t, "consensus-non-fatal-comment-update-errors-");
   const reportsDir = path.join(tempDir, "reports");
   fs.mkdirSync(reportsDir, { recursive: true });
+  const { workspaceDir, baseSha, headSha } = createWorkspaceWithFileChange({
+    t,
+    relativePath: "src/old.ts",
+    baseContents: "export const oldValue = 1;\n",
+    headContents: "export const oldValue = 2;\n",
+    prefix: "consensus-non-fatal-workspace-",
+  });
 
   writeReport(
     reportsDir,
     "security",
     baseReport({
-      resolved_finding_ids: ["SEC-1"],
+      resolved_finding_ids: ["SEC001"],
       new_findings: [],
     }),
   );
@@ -678,7 +748,7 @@ test("runConsensus tolerates non-fatal inline comment update API errors", async 
         version: 1,
         findings: [
           {
-            id: "SEC-1",
+            id: "SEC001",
             reviewer: "security",
             status: "open",
             title: "Old open issue",
@@ -756,7 +826,9 @@ test("runConsensus tolerates non-fatal inline comment update API errors", async 
 
   const result = await runConsensus({
     runId: "106",
-    sha: "abc888",
+    baseSha,
+    sha: headSha,
+    workspaceDir,
     commentPath: path.join(tempDir, "comment.md"),
     ledgerPath: path.join(tempDir, "ledger.json"),
     token: "token",
@@ -780,7 +852,452 @@ test("runConsensus tolerates non-fatal inline comment update API errors", async 
   assert.equal(result.openFindingsCount, 0);
 
   const ledger = JSON.parse(fs.readFileSync(path.join(tempDir, "ledger.json"), "utf8"));
-  const sec1 = ledger.findings.find((finding) => finding.id === "SEC-1");
+  const sec1 = ledger.findings.find((finding) => finding.id === "SEC001");
   assert.equal(sec1.status, "resolved");
   assert.equal(sec1.inline_comment_id, 777);
+});
+
+test("runConsensus fails when PRIOR_LEDGER_JSON is malformed", async (t) => {
+  const tempDir = createTempDir(t, "consensus-invalid-prior-ledger-");
+  const reportsDir = path.join(tempDir, "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+  writeReport(reportsDir, "security", baseReport());
+
+  const priorLedgerPath = path.join(tempDir, "prior-ledger.json");
+  fs.writeFileSync(priorLedgerPath, "{bad-json", "utf8");
+
+  await assert.rejects(
+    runConsensus({
+      runId: "900",
+      sha: "abc123",
+      commentPath: path.join(tempDir, "comment.md"),
+      ledgerPath: path.join(tempDir, "ledger.json"),
+      token: "",
+      repo: "",
+      marker: "<!-- marker -->",
+      reportsDir,
+      reviewersJson: JSON.stringify([
+        {
+          id: "security",
+          display_name: "Security",
+        },
+      ]),
+      publishInlineComments: "true",
+      priorLedgerJson: priorLedgerPath,
+    }),
+    /Invalid PRIOR_LEDGER_JSON/,
+  );
+});
+
+test("runConsensus trusts reviewer resolved_finding_ids for lifecycle transitions", async (t) => {
+  const tempDir = createTempDir(t, "consensus-reviewer-resolution-default-");
+  const reportsDir = path.join(tempDir, "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+
+  writeReport(
+    reportsDir,
+    "security",
+    baseReport({
+      resolved_finding_ids: ["SEC001"],
+      new_findings: [],
+    }),
+  );
+
+  const priorLedgerPath = path.join(tempDir, "prior-ledger.json");
+  fs.writeFileSync(
+    priorLedgerPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        findings: [
+          {
+            id: "SEC001",
+            reviewer: "security",
+            status: "open",
+            title: "Existing blocker",
+            recommendation: "Fix it",
+            file: "src/a.ts",
+            line: 1,
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const result = await runConsensus({
+    runId: "901",
+    baseSha: "",
+    sha: "abc123",
+    workspaceDir: tempDir,
+    commentPath: path.join(tempDir, "comment.md"),
+    ledgerPath: path.join(tempDir, "ledger.json"),
+    token: "",
+    repo: "",
+    marker: "<!-- marker -->",
+    reportsDir,
+    reviewersJson: JSON.stringify([
+      {
+        id: "security",
+        display_name: "Security",
+      },
+    ]),
+    publishInlineComments: "false",
+    priorLedgerJson: priorLedgerPath,
+  });
+
+  assert.equal(result.outcome, "PASS");
+  assert.equal(result.outcomeReason, "PASS_NO_FINDINGS");
+  const ledger = JSON.parse(fs.readFileSync(path.join(tempDir, "ledger.json"), "utf8"));
+  assert.equal(ledger.findings[0].status, "resolved");
+});
+
+test("runConsensus backfills thread ids across paginated review threads and resolves lifecycle", async (t) => {
+  const tempDir = createTempDir(t, "consensus-thread-backfill-");
+  const reportsDir = path.join(tempDir, "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+  const { workspaceDir, baseSha, headSha } = createWorkspaceWithFileChange({
+    t,
+    relativePath: "src/old.ts",
+    baseContents: "export const oldValue = 1;\n",
+    headContents: "export const oldValue = 2;\n",
+    prefix: "consensus-thread-backfill-workspace-",
+  });
+
+  writeReport(
+    reportsDir,
+    "security",
+    baseReport({
+      resolved_finding_ids: ["SEC001"],
+      new_findings: [],
+    }),
+  );
+
+  const priorLedgerPath = path.join(tempDir, "prior-ledger.json");
+  fs.writeFileSync(
+    priorLedgerPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        findings: [
+          {
+            id: "SEC001",
+            reviewer: "security",
+            status: "open",
+            title: "Old open issue",
+            recommendation: "Fix old issue",
+            file: "src/old.ts",
+            line: 3,
+            inline_comment_id: 901,
+            inline_thread_id: "",
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const patchedInlineComments = [];
+  const threadMutations = [];
+  let reviewThreadQueryCalls = 0;
+  const reviewThreadCursorsSeen = new Set();
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    const target = String(url);
+
+    if (method === "PATCH" && /\/pulls\/comments\/901$/.test(target)) {
+      const body = JSON.parse(String(options.body || "{}"));
+      patchedInlineComments.push(String(body?.body || ""));
+      return new Response(
+        JSON.stringify({
+          id: 901,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "POST" && target === "https://api.github.com/graphql") {
+      const payload = JSON.parse(String(options.body || "{}"));
+      const query = String(payload.query || "");
+      const threadId = String(payload?.variables?.threadId || "");
+
+      if (query.includes("PullRequestReviewThreads")) {
+        reviewThreadQueryCalls += 1;
+        const cursor = payload?.variables?.cursor ?? null;
+        reviewThreadCursorsSeen.add(cursor);
+        if (cursor === null) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                repository: {
+                  pullRequest: {
+                    reviewThreads: {
+                      pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+                      nodes: [
+                        {
+                          id: "thread-unrelated",
+                          isResolved: false,
+                          comments: {
+                            nodes: [{ databaseId: 999 }],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        assert.equal(cursor, "cursor-1");
+        return new Response(
+          JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        id: "thread-901",
+                        isResolved: false,
+                        comments: {
+                          nodes: [{ databaseId: 901 }],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (query.includes("ResolveReviewThread")) {
+        threadMutations.push({ action: "resolve", threadId });
+        return new Response(
+          JSON.stringify({
+            data: {
+              resolveReviewThread: {
+                thread: {
+                  id: threadId,
+                  isResolved: true,
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+    }
+
+    throw new Error(`Unexpected request ${method} ${target}`);
+  };
+
+  const result = await runConsensus({
+    runId: "902",
+    baseSha,
+    sha: headSha,
+    workspaceDir,
+    commentPath: path.join(tempDir, "comment.md"),
+    ledgerPath: path.join(tempDir, "ledger.json"),
+    token: "token",
+    repo: "owner/repo",
+    prNumber: "12",
+    marker: "<!-- marker -->",
+    reportsDir,
+    reviewersJson: JSON.stringify([
+      {
+        id: "security",
+        display_name: "Security",
+      },
+    ]),
+    publishInlineComments: "true",
+    priorLedgerJson: priorLedgerPath,
+  });
+
+  assert.equal(result.outcome, "PASS");
+  assert.equal(result.outcomeReason, "PASS_NO_FINDINGS");
+  assert.ok(reviewThreadQueryCalls >= 2);
+  assert.equal(reviewThreadCursorsSeen.has(null), true);
+  assert.equal(reviewThreadCursorsSeen.has("cursor-1"), true);
+  assert.equal(patchedInlineComments.length, 1);
+  assert.match(
+    patchedInlineComments[0],
+    new RegExp(`Status: Resolved in ${headSha.slice(0, 7)}\\.`),
+  );
+  assert.deepEqual(threadMutations, [
+    {
+      action: "resolve",
+      threadId: "thread-901",
+    },
+  ]);
+
+  const ledger = JSON.parse(fs.readFileSync(path.join(tempDir, "ledger.json"), "utf8"));
+  assert.equal(ledger.findings[0].inline_thread_id, "thread-901");
+  assert.equal(ledger.findings[0].status, "resolved");
+});
+
+test("runConsensus reconciles existing resolved findings when thread state is stale", async (t) => {
+  const tempDir = createTempDir(t, "consensus-thread-reconcile-");
+  const reportsDir = path.join(tempDir, "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+
+  writeReport(reportsDir, "security", baseReport());
+
+  const priorLedgerPath = path.join(tempDir, "prior-ledger.json");
+  fs.writeFileSync(
+    priorLedgerPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        findings: [
+          {
+            id: "SEC001",
+            reviewer: "security",
+            status: "resolved",
+            title: "Historical resolved issue",
+            recommendation: "Keep fixed",
+            file: "src/old.ts",
+            line: 3,
+            inline_comment_id: 933,
+            inline_thread_id: "thread-933",
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const threadMutations = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    const target = String(url);
+
+    if (method === "PATCH" && /\/pulls\/comments\/933$/.test(target)) {
+      throw new Error("Unexpected inline comment update for stale-thread reconciliation");
+    }
+
+    if (method === "POST" && target === "https://api.github.com/graphql") {
+      const payload = JSON.parse(String(options.body || "{}"));
+      const query = String(payload.query || "");
+      const threadId = String(payload?.variables?.threadId || "");
+
+      if (query.includes("PullRequestReviewThreads")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        id: "thread-933",
+                        isResolved: false,
+                        comments: {
+                          nodes: [{ databaseId: 933 }],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (query.includes("ResolveReviewThread")) {
+        threadMutations.push({ action: "resolve", threadId });
+        return new Response(
+          JSON.stringify({
+            data: {
+              resolveReviewThread: {
+                thread: {
+                  id: threadId,
+                  isResolved: true,
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+    }
+
+    throw new Error(`Unexpected request ${method} ${target}`);
+  };
+
+  const result = await runConsensus({
+    runId: "903",
+    sha: "deadbeef",
+    commentPath: path.join(tempDir, "comment.md"),
+    ledgerPath: path.join(tempDir, "ledger.json"),
+    token: "token",
+    repo: "owner/repo",
+    prNumber: "13",
+    marker: "<!-- marker -->",
+    reportsDir,
+    reviewersJson: JSON.stringify([
+      {
+        id: "security",
+        display_name: "Security",
+      },
+    ]),
+    publishInlineComments: "true",
+    priorLedgerJson: priorLedgerPath,
+  });
+
+  assert.equal(result.outcome, "PASS");
+  assert.equal(result.outcomeReason, "PASS_NO_FINDINGS");
+  assert.deepEqual(threadMutations, [
+    {
+      action: "resolve",
+      threadId: "thread-933",
+    },
+  ]);
+
+  const ledger = JSON.parse(fs.readFileSync(path.join(tempDir, "ledger.json"), "utf8"));
+  assert.equal(ledger.findings[0].status, "resolved");
+  assert.equal(ledger.findings[0].inline_thread_id, "thread-933");
 });

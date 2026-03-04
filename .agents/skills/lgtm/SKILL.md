@@ -1,6 +1,6 @@
 ---
 name: lgtm
-description: Use to consume LGTM workflow output on the current GitHub pull request, download the latest LGTM artifacts, and drive fix loops until LGTM passes. Trigger when asked to check LGTM feedback, handle blocking findings, debug reviewer errors, or iterate on LGTM FAIL outcomes.
+description: Use to consume LGTM workflow output on the current pull request, restore the latest findings ledger artifact, and drive fix loops until LGTM passes. Trigger when asked to check LGTM feedback, handle open findings, debug reviewer errors, or iterate on LGTM FAIL outcomes.
 ---
 
 # LGTM
@@ -22,18 +22,27 @@ bash .agents/skills/lgtm/scripts/fetch_lgtm_context.sh
   - run metadata,
   - reviewer run states,
   - reviewer errors,
-  - blocking findings with file/line/title/recommendation.
+  - open/resolved findings from `findings-ledger.json`,
+  - recent PR issue comments and inline review replies for steering.
+
+1. Read steering context before coding.
+
+- Pull explicit guidance from:
+  - recent human PR issue comments,
+  - inline review replies (`in_reply_to_id` chains).
+- Treat comments as steering signals. Gate logic still comes from reviewer errors + open ledger findings.
 
 1. Triage in strict order.
 
 - First: reviewer execution/output errors (`run_state=error`) because findings may be incomplete when reviewers fail.
-- Second: blocking findings (`blocking: true`).
-- Third: advisory findings.
+- Second: open findings (`status=open`) from `findings-ledger.json`.
+- Third: resolved findings context only when evidence shows a regression/reopen.
 
 1. Implement targeted fixes.
 
-- Use report file refs as starting points, then verify in code before patching.
-- Keep patches tightly scoped to each blocking finding.
+- Use ledger finding IDs (for example `SEC001`) and file refs as anchors, then verify in code before patching.
+- Keep patches tightly scoped to each open finding.
+- Incorporate explicit maintainer/reviewer steering from PR comment threads where applicable.
 - If a finding is a false positive, still leave an evidence trail in PR discussion.
 
 1. Validate and rerun.
@@ -61,15 +70,20 @@ Read merged JSON in full:
 jq . /tmp/lgtm-<run-id>/lgtm-<run-id>/reports-merged.json
 ```
 
-List blocking findings only:
+Read findings ledger in full:
+
+```bash
+jq . /tmp/lgtm-<run-id>/lgtm-<run-id>/findings-ledger.json
+```
+
+List open findings only:
 
 ```bash
 jq -r '
-  to_entries[] as $reviewer
-  | ($reviewer.value.findings // [])[]?
-  | select(.blocking == true)
-  | "- [\((.severity // "info") | ascii_upcase)] \($reviewer.key)/\(.id // "unknown-id") \((.file // "-") + (if ((.line|type) == "number" and .line > 0) then ":" + (.line|tostring) else "" end))\n  \(.title // "Untitled finding")\n  Recommendation: \(.recommendation // "No recommendation provided.")"
-' /tmp/lgtm-<run-id>/lgtm-<run-id>/reports-merged.json
+  (.findings // [])[]?
+  | select(.status == "open")
+  | "- [\(.id)] \(.reviewer) \((.file // "-") + (if ((.line|type) == "number" and .line > 0) then ":" + (.line|tostring) else "" end))\n  \(.title)\n  Recommendation: \(.recommendation)"
+' /tmp/lgtm-<run-id>/lgtm-<run-id>/findings-ledger.json
 ```
 
 ## References

@@ -43,5 +43,7 @@ test("smoke-consumer template includes setup guidance", () => {
   assert.equal(fs.existsSync(SMOKE_CONSUMER_README_PATH), true);
   const readme = fs.readFileSync(SMOKE_CONSUMER_README_PATH, "utf8");
   assert.match(readme, /OPENAI_API_KEY/);
+  assert.match(readme, /LGTM_GITHUB_APP_ID/);
+  assert.match(readme, /LGTM_GITHUB_APP_PRIVATE_KEY/);
   assert.match(readme, /\.github\/lgtm\/prompts/);
 });

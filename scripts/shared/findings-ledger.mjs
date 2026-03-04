@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
+import {
+  canNormalizeFindingId,
+  formatFindingId,
+  normalizeFindingId,
+  parseFindingIdNumber,
+} from "./finding-id.mjs";
+
 function normalizeText(value) {
   return String(value ?? "")
     .replace(/\r\n/g, "\n")
     .trim();
-}
-
-function normalizeFindingId(value) {
-  return normalizeText(value).toUpperCase();
 }
 
 function normalizeLine(value) {
@@ -38,16 +41,16 @@ function createEmptyLedger() {
   };
 }
 
-function normalizeLedgerFinding(entry) {
+function normalizeLedgerFinding(entry, index) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-    return null;
+    throw new Error(`findings[${index}] must be an object`);
   }
 
   const id = normalizeFindingId(entry.id);
   const reviewer = normalizeText(entry.reviewer);
   const title = normalizeText(entry.title);
   if (!id || !reviewer || !title) {
-    return null;
+    throw new Error(`findings[${index}] must include non-empty id, reviewer, and title`);
   }
 
   const status = normalizeStatus(entry.status);
@@ -80,15 +83,27 @@ function normalizeLedgerFinding(entry) {
 }
 
 export function normalizeLedger(rawLedger) {
-  if (!rawLedger || typeof rawLedger !== "object" || Array.isArray(rawLedger)) {
+  if (rawLedger === null || rawLedger === undefined || rawLedger === "") {
     return createEmptyLedger();
   }
 
-  const findings = Array.isArray(rawLedger.findings)
-    ? rawLedger.findings
-        .map((entry) => normalizeLedgerFinding(entry))
-        .filter(Boolean)
-    : [];
+  if (typeof rawLedger !== "object" || Array.isArray(rawLedger)) {
+    throw new Error("ledger root must be an object");
+  }
+
+  if (!Array.isArray(rawLedger.findings)) {
+    throw new Error("ledger must include findings array");
+  }
+
+  const ids = new Set();
+  const findings = rawLedger.findings.map((entry, index) => {
+    const normalized = normalizeLedgerFinding(entry, index);
+    if (ids.has(normalized.id)) {
+      throw new Error(`duplicate finding id in ledger: ${normalized.id}`);
+    }
+    ids.add(normalized.id);
+    return normalized;
+  });
 
   return {
     version: 1,
@@ -122,12 +137,6 @@ export function buildFindingIdPrefix(reviewerId) {
     .map((token) => token[0].toUpperCase())
     .join("")
     .slice(0, 4);
-}
-
-function parseFindingIdNumber(id, prefix) {
-  const match = normalizeFindingId(id).match(new RegExp(`^${prefix}-(\\d+)$`));
-  if (!match) return 0;
-  return Number.parseInt(match[1], 10);
 }
 
 function findNextNumber(findings, reviewer) {
@@ -194,13 +203,17 @@ export function mergeLedgerWithReports({
       continue;
     }
 
-    const resolvedIds = new Set(
-      Array.isArray(report.resolved_finding_ids)
-        ? report.resolved_finding_ids
-            .map((value) => normalizeFindingId(value))
-            .filter(Boolean)
-        : [],
-    );
+    const resolvedIds = new Set();
+    for (const rawResolvedId of Array.isArray(report.resolved_finding_ids)
+      ? report.resolved_finding_ids
+      : []) {
+      if (!canNormalizeFindingId(rawResolvedId)) {
+        throw new Error(
+          `${reviewerId}: resolved_finding_ids includes invalid finding id ${JSON.stringify(rawResolvedId)}`,
+        );
+      }
+      resolvedIds.add(normalizeFindingId(rawResolvedId));
+    }
 
     for (const resolvedId of resolvedIds) {
       const existing = findingsById.get(resolvedId);
@@ -227,34 +240,56 @@ export function mergeLedgerWithReports({
       const recommendation = defaultRecommendation(rawFinding.recommendation);
       const file = normalizeText(rawFinding.file) || null;
       const line = normalizeLine(rawFinding.line);
-      const reopenFindingId = normalizeFindingId(rawFinding.reopen_finding_id);
+      const rawReopenFindingId = rawFinding.reopen_finding_id;
+      if (rawReopenFindingId !== null && rawReopenFindingId !== undefined && rawReopenFindingId !== "") {
+        if (!canNormalizeFindingId(rawReopenFindingId)) {
+          throw new Error(
+            `${reviewerId}: reopen_finding_id must be a valid finding id (received ${JSON.stringify(rawReopenFindingId)})`,
+          );
+        }
+      }
+      const reopenFindingId = normalizeFindingId(rawReopenFindingId);
 
       if (reopenFindingId) {
         const existing = findingsById.get(reopenFindingId);
-        if (existing && existing.reviewer === reviewerId) {
-          const wasResolved = existing.status === "resolved";
-          existing.status = "open";
-          existing.title = title;
-          existing.recommendation = recommendation;
-          existing.file = file;
-          existing.line = line;
-          existing.updated_run_id = normalizedRunId;
-          existing.updated_at = normalizedTimestamp;
-          existing.resolved_at = null;
-
-          if (wasResolved) {
-            const presentation = toPresentationEntry(existing);
-            reopenedEntries.push(presentation);
-            newlyOpenedEntries.push(presentation);
-          }
-          continue;
+        if (!existing) {
+          throw new Error(
+            `${reviewerId}: reopen_finding_id ${reopenFindingId} does not exist in prior ledger`,
+          );
         }
+        if (existing.reviewer !== reviewerId) {
+          throw new Error(
+            `${reviewerId}: reopen_finding_id ${reopenFindingId} belongs to reviewer ${existing.reviewer}`,
+          );
+        }
+        if (existing.status !== "resolved") {
+          throw new Error(
+            `${reviewerId}: reopen_finding_id ${reopenFindingId} must reference a resolved finding`,
+          );
+        }
+
+        const wasResolved = existing.status === "resolved";
+        existing.status = "open";
+        existing.title = title;
+        existing.recommendation = recommendation;
+        existing.file = file;
+        existing.line = line;
+        existing.updated_run_id = normalizedRunId;
+        existing.updated_at = normalizedTimestamp;
+        existing.resolved_at = null;
+
+        if (wasResolved) {
+          const presentation = toPresentationEntry(existing);
+          reopenedEntries.push(presentation);
+          newlyOpenedEntries.push(presentation);
+        }
+        continue;
       }
 
-      let newId = `${prefix}-${nextNumber}`;
+      let newId = formatFindingId(prefix, nextNumber);
       while (findingsById.has(newId)) {
         nextNumber += 1;
-        newId = `${prefix}-${nextNumber}`;
+        newId = formatFindingId(prefix, nextNumber);
       }
 
       const created = {

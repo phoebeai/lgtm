@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { normalizeFindingId } from "./finding-id.mjs";
+
 function normalizeInline(value) {
   return String(value ?? "")
     .replace(/\r?\n+/g, " ")
@@ -8,11 +10,13 @@ function normalizeInline(value) {
 }
 
 export function formatFindingHeadline({ reviewerLabel, finding }) {
-  const normalizedReviewerLabel = normalizeInline(reviewerLabel || "Unknown Reviewer");
-  const findingId = normalizeInline(finding?.id || "");
+  const findingId = normalizeInline(normalizeFindingId(finding?.id || ""));
   const title = normalizeInline(finding?.title || "Untitled finding");
-  const idSuffix = findingId ? ` [${findingId}]` : "";
-  return `**${normalizedReviewerLabel}${idSuffix}:** ${title}`;
+  if (findingId) {
+    return `**[${findingId}]** ${title}`;
+  }
+  const normalizedReviewerLabel = normalizeInline(reviewerLabel || "Unknown Reviewer");
+  return `**${normalizedReviewerLabel}:** ${title}`;
 }
 
 export function formatFindingRecommendation(finding) {

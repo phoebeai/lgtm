@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 
+import {
+  canNormalizeFindingId,
+  normalizeFindingId as normalizeFindingIdCanonical,
+} from "./finding-id.mjs";
+
 export const REVIEWER_ID_PATTERN = /^[a-z0-9_]+$/;
 
 const VALID_RUN_STATES = new Set(["completed", "skipped", "error"]);
@@ -37,7 +42,17 @@ export function asBool(value) {
 
 export function normalizeFindingId(value) {
   if (!isNonEmptyString(value)) return "";
-  return value.trim().toUpperCase();
+  return normalizeFindingIdCanonical(value);
+}
+
+function normalizeFindingIdStrict(value, fieldLabel) {
+  if (!isNonEmptyString(value)) {
+    throw new Error(`${fieldLabel} must be a non-empty string`);
+  }
+  if (!canNormalizeFindingId(value)) {
+    throw new Error(`${fieldLabel} must be a valid finding id (for example SEC001)`);
+  }
+  return normalizeFindingIdCanonical(value);
 }
 
 export function makeBasePayload({
@@ -103,12 +118,7 @@ function normalizeReopenFindingId(value) {
     return null;
   }
 
-  const normalized = normalizeFindingId(value);
-  if (!normalized) {
-    throw new Error("reopen_finding_id must be a non-empty string when provided");
-  }
-
-  return normalized;
+  return normalizeFindingIdStrict(value, "reopen_finding_id");
 }
 
 export function normalizeNewFindingsStrict(rawFindings) {
@@ -174,10 +184,10 @@ export function normalizeResolvedFindingIdsStrict(rawIds) {
 
   const ids = [];
   for (let index = 0; index < rawIds.length; index += 1) {
-    const normalized = normalizeFindingId(rawIds[index]);
-    if (!normalized) {
-      throw new Error(`resolved_finding_ids[${index}] must be a non-empty string`);
-    }
+    const normalized = normalizeFindingIdStrict(
+      rawIds[index],
+      `resolved_finding_ids[${index}]`,
+    );
     ids.push(normalized);
   }
 
@@ -249,6 +259,26 @@ export function normalizePersistedReviewerReport(reviewer, raw) {
   }
 
   const runState = VALID_RUN_STATES.has(parsed.run_state) ? parsed.run_state : "error";
+  if (runState === "completed") {
+    try {
+      return normalizeStructuredReviewerPayload(
+        {
+          reviewer: parsed.reviewer,
+          summary: parsed.summary,
+          resolved_finding_ids: parsed.resolved_finding_ids,
+          new_findings: parsed.new_findings,
+          errors: parsed.errors,
+        },
+        expectedReviewer,
+      );
+    } catch (error) {
+      return makeParseFailurePayload(
+        expectedReviewer,
+        `invalid completed reviewer report: ${error.message}`,
+      );
+    }
+  }
+
   const newFindings = Array.isArray(parsed.new_findings)
     ? parsed.new_findings.map((finding) => normalizeFindingLenient(finding))
     : [];

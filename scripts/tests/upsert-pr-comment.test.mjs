@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { upsertPrComment } from "../upsert-pr-comment.mjs";
+import { resolveTrustedStickyOwners, upsertPrComment } from "../upsert-pr-comment.mjs";
 
 function createTempCommentFile(t, content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lgtm-comment-"));
@@ -16,8 +16,8 @@ function createTempCommentFile(t, content) {
   return filePath;
 }
 
-test("upsertPrComment paginates comment list and updates existing bot comment", async (t) => {
-  const commentPath = createTempCommentFile(t, "<!-- codex-lgtm -->\nupdated body");
+test("upsertPrComment paginates comment list and updates existing marker comment", async (t) => {
+  const commentPath = createTempCommentFile(t, "<!-- lgtm-sticky-comment -->\nupdated body");
   const originalFetch = globalThis.fetch;
   const calls = [];
 
@@ -43,8 +43,8 @@ test("upsertPrComment paginates comment list and updates existing bot comment", 
       return new Response(JSON.stringify([
         {
           id: 999,
-          body: "<!-- codex-lgtm --> old body",
-          user: { login: "github-actions[bot]" },
+          body: "<!-- lgtm-sticky-comment --> old body",
+          user: { login: "phoebe-lgtm[bot]" },
         },
       ]), {
         status: 200,
@@ -71,7 +71,7 @@ test("upsertPrComment paginates comment list and updates existing bot comment", 
     repo: "owner/repo",
     prNumber: "7",
     commentPath,
-    actor: "github-actions[bot]",
+    trustedOwnerLogins: "phoebe-lgtm[bot]",
   });
 
   assert.deepEqual(result, {
@@ -87,11 +87,67 @@ test("upsertPrComment paginates comment list and updates existing bot comment", 
   assert.equal(calls[2].url, "https://api.github.com/repos/owner/repo/issues/comments/999");
 
   const patchBody = JSON.parse(calls[2].body);
-  assert.equal(patchBody.body, "<!-- codex-lgtm -->\nupdated body");
+  assert.equal(patchBody.body, "<!-- lgtm-sticky-comment -->\nupdated body");
+});
+
+test("upsertPrComment creates new sticky comment when marker exists on untrusted author", async (t) => {
+  const commentPath = createTempCommentFile(t, "<!-- lgtm-sticky-comment -->\nnew body");
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    calls.push({ url, method, body: options.body });
+
+    if (method === "GET") {
+      return new Response(JSON.stringify([
+        {
+          id: 444,
+          body: "<!-- lgtm-sticky-comment -->\nforeign marker comment",
+          user: { login: "octocat" },
+        },
+      ]), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      });
+    }
+
+    if (method === "POST") {
+      return new Response(JSON.stringify({ id: 555 }), {
+        status: 201,
+        headers: {
+          "content-type": "application/json",
+        },
+      });
+    }
+
+    throw new Error(`Unexpected request ${method} ${url}`);
+  };
+
+  const result = await upsertPrComment({
+    token: "token",
+    repo: "owner/repo",
+    prNumber: "7",
+    commentPath,
+    trustedOwnerLogins: "phoebe-lgtm[bot]",
+  });
+
+  assert.deepEqual(result, {
+    action: "created",
+    commentId: 555,
+  });
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[1].method, "POST");
 });
 
 test("upsertPrComment creates a new comment when no matching marker exists", async (t) => {
-  const commentPath = createTempCommentFile(t, "<!-- codex-lgtm -->\nnew body");
+  const commentPath = createTempCommentFile(t, "<!-- lgtm-sticky-comment -->\nnew body");
   const originalFetch = globalThis.fetch;
   const calls = [];
 
@@ -129,7 +185,7 @@ test("upsertPrComment creates a new comment when no matching marker exists", asy
     repo: "owner/repo",
     prNumber: "7",
     commentPath,
-    actor: "github-actions[bot]",
+    trustedOwnerLogins: "phoebe-lgtm[bot]",
   });
 
   assert.deepEqual(result, {
@@ -142,7 +198,7 @@ test("upsertPrComment creates a new comment when no matching marker exists", asy
 });
 
 test("upsertPrComment ignores legacy markers and creates a new LGTM marker comment", async (t) => {
-  const commentPath = createTempCommentFile(t, "<!-- codex-lgtm -->\nnew body");
+  const commentPath = createTempCommentFile(t, "<!-- lgtm-sticky-comment -->\nnew body");
   const originalFetch = globalThis.fetch;
   const calls = [];
 
@@ -186,7 +242,7 @@ test("upsertPrComment ignores legacy markers and creates a new LGTM marker comme
     repo: "owner/repo",
     prNumber: "7",
     commentPath,
-    actor: "github-actions[bot]",
+    trustedOwnerLogins: "phoebe-lgtm[bot]",
   });
 
   assert.deepEqual(result, {
@@ -196,4 +252,104 @@ test("upsertPrComment ignores legacy markers and creates a new LGTM marker comme
   assert.equal(calls.length, 2);
   assert.equal(calls[0].method, "GET");
   assert.equal(calls[1].method, "POST");
+});
+
+test("upsertPrComment updates the most recently updated trusted marker comment", async (t) => {
+  const commentPath = createTempCommentFile(t, "<!-- lgtm-sticky-comment -->\nnew body");
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    calls.push({ url, method, body: options.body });
+
+    if (method === "GET") {
+      return new Response(JSON.stringify([
+        {
+          id: 100,
+          body: "<!-- lgtm-sticky-comment -->\nold trusted marker",
+          user: { login: "phoebe-lgtm[bot]" },
+          updated_at: "2026-03-01T00:00:00Z",
+        },
+        {
+          id: 101,
+          body: "<!-- lgtm-sticky-comment -->\nnew trusted marker",
+          user: { login: "phoebe-lgtm[bot]" },
+          updated_at: "2026-03-02T00:00:00Z",
+        },
+      ]), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      });
+    }
+
+    if (method === "PATCH") {
+      return new Response(JSON.stringify({ id: 101 }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      });
+    }
+
+    throw new Error(`Unexpected request ${method} ${url}`);
+  };
+
+  const result = await upsertPrComment({
+    token: "token",
+    repo: "owner/repo",
+    prNumber: "7",
+    commentPath,
+    trustedOwnerLogins: "phoebe-lgtm[bot]",
+  });
+
+  assert.deepEqual(result, {
+    action: "updated",
+    commentId: 101,
+  });
+  assert.equal(calls[1].method, "PATCH");
+  assert.equal(calls[1].url, "https://api.github.com/repos/owner/repo/issues/comments/101");
+});
+
+test("resolveTrustedStickyOwners derives app bot login from installation metadata", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    calls.push({ method, url: String(url) });
+
+    if (method === "GET" && String(url) === "https://api.github.com/repos/owner/repo/installation") {
+      return new Response(JSON.stringify({ app_slug: "phoebe-lgtm" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (method === "GET" && String(url) === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ login: "phoebe-lgtm[bot]" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected request ${method} ${url}`);
+  };
+
+  const trustedOwners = await resolveTrustedStickyOwners({
+    apiBase: "https://api.github.com/repos/owner/repo",
+    token: "token",
+  });
+
+  assert.equal(trustedOwners.has("phoebe-lgtm[bot]"), true);
+  assert.equal(calls.length, 2);
 });
