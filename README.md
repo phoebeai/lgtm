@@ -108,6 +108,16 @@ Required secret:
 
 - `openai_api_key`
 
+GitHub auth:
+
+- No extra GitHub secret is required. LGTM uses the built-in `GITHUB_TOKEN` (`github.token`).
+- Caller workflow must grant:
+  - `pull-requests: write`
+  - `contents: read`
+  - `actions: read`
+- In repository settings, enable workflow token write permissions:
+  - `Settings -> Actions -> General -> Workflow permissions -> Read and write permissions`
+
 ## Security Model
 
 - Config and prompt files are read from the trusted base commit, not PR head.
