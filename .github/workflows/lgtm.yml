@@ -57,9 +57,6 @@ on:
       openai_api_key:
         description: OpenAI API key for Codex reviewer execution.
         required: true
-      github_api_token:
-        description: Optional GitHub token with permissions to resolve/unresolve PR review threads.
-        required: false
 
 concurrency:
   group: lgtm-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.ref }}
@@ -107,7 +104,7 @@ jobs:
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
-          GITHUB_TOKEN: ${{ secrets.github_api_token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           API_URL: ${{ github.api_url }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -187,7 +184,7 @@ jobs:
       - name: Find prior ledger artifact run
         id: prior_ledger_run
         env:
-          GITHUB_TOKEN: ${{ secrets.github_api_token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -199,7 +196,7 @@ jobs:
         with:
           name: ${{ steps.prior_ledger_run.outputs.prior_artifact_name }}
           run-id: ${{ steps.prior_ledger_run.outputs.prior_run_id }}
-          github-token: ${{ secrets.github_api_token || secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           path: ${{ runner.temp }}/lgtm-prior-artifact
 
       - name: Prepare prior ledger
@@ -274,7 +271,7 @@ jobs:
         env:
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
-          GITHUB_TOKEN: ${{ secrets.github_api_token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           MARKER: "<!-- codex-lgtm -->"
           SHA: ${{ steps.pr.outputs.head_sha }}
@@ -308,7 +305,7 @@ jobs:
       - name: Upsert sticky PR comment
         if: ${{ always() && inputs.publish_comment }}
         env:
-          GITHUB_TOKEN: ${{ secrets.github_api_token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           MARKER: "<!-- codex-lgtm -->"

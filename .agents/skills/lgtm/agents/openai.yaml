@@ -1,0 +1,4 @@
+interface:
+  display_name: "LGTM"
+  short_description: "Fetch LGTM findings and iterate fixes"
+  default_prompt: "Use $lgtm to fetch the latest LGTM findings for this PR, apply fixes for blocking findings first, and rerun until LGTM passes."
