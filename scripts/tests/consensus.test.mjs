@@ -386,6 +386,19 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
     const method = options.method || "GET";
     const target = String(url);
 
+    if (method === "GET" && /\/pulls\/7$/.test(target)) {
+      return new Response(
+        JSON.stringify({
+          number: 7,
+          user: { login: "alice" },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
     if (method === "GET" && /\/pulls\/7\/reviews\?/.test(target)) {
       return new Response(
         JSON.stringify([
@@ -394,6 +407,7 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
             state: "APPROVED",
             commit_id: "oldsha",
             submitted_at: "2026-01-01T00:00:00Z",
+            author_association: "OWNER",
             user: { login: "alice", type: "User" },
           },
           {
@@ -401,6 +415,7 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
             state: "APPROVED",
             commit_id: "abc123",
             submitted_at: "2026-01-02T00:00:00Z",
+            author_association: "MEMBER",
             user: { login: "bob", type: "User" },
           },
           {
@@ -408,6 +423,7 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
             state: "APPROVED",
             commit_id: "abc123",
             submitted_at: "2026-01-03T00:00:00Z",
+            author_association: "MEMBER",
             user: { login: "github-actions[bot]", type: "Bot" },
           },
           {
@@ -415,7 +431,24 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
             state: "DISMISSED",
             commit_id: "abc123",
             submitted_at: "2026-01-04T00:00:00Z",
+            author_association: "MEMBER",
             user: { login: "carol", type: "User" },
+          },
+          {
+            id: 5,
+            state: "APPROVED",
+            commit_id: "abc123",
+            submitted_at: "2026-01-05T00:00:00Z",
+            author_association: "CONTRIBUTOR",
+            user: { login: "dave", type: "User" },
+          },
+          {
+            id: 6,
+            state: "APPROVED",
+            commit_id: "abc123",
+            submitted_at: "2026-01-06T00:00:00Z",
+            author_association: "OWNER",
+            user: { login: "alice", type: "User" },
           },
         ]),
         {
@@ -456,4 +489,245 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
   assert.equal(result.outcomeReason, "PASS_HUMAN_BYPASS");
   assert.equal(result.humanBypass.approved, true);
   assert.deepEqual(result.humanBypass.approvers, ["bob"]);
+});
+
+test("runConsensus maps inline threads, resolves old threads, and unresolves reopened threads without duplicating reopen comments", async (t) => {
+  const tempDir = createTempDir(t, "consensus-inline-lifecycle-");
+  const reportsDir = path.join(tempDir, "reports");
+  fs.mkdirSync(reportsDir, { recursive: true });
+
+  writeReport(
+    reportsDir,
+    "security",
+    baseReport({
+      resolved_finding_ids: ["SEC-1"],
+      new_findings: [
+        {
+          title: "Reopened issue",
+          file: "src/reopen.ts",
+          line: 22,
+          recommendation: "Re-fix",
+          reopen_finding_id: "SEC-2",
+        },
+        {
+          title: "New issue",
+          file: "src/new.ts",
+          line: 9,
+          recommendation: "Fix new issue",
+          reopen_finding_id: null,
+        },
+      ],
+    }),
+  );
+
+  const priorLedgerPath = path.join(tempDir, "prior-ledger.json");
+  fs.writeFileSync(
+    priorLedgerPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        findings: [
+          {
+            id: "SEC-1",
+            reviewer: "security",
+            status: "open",
+            title: "Old open issue",
+            recommendation: "Fix old issue",
+            file: "src/old.ts",
+            line: 3,
+            inline_thread_id: "thread-resolve",
+          },
+          {
+            id: "SEC-2",
+            reviewer: "security",
+            status: "resolved",
+            title: "Previously resolved issue",
+            recommendation: "Keep fixed",
+            file: "src/reopen.ts",
+            line: 22,
+            inline_thread_id: "thread-reopen",
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const postedInlineBodies = [];
+  const threadMutations = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    const target = String(url);
+
+    if (method === "POST" && /\/pulls\/8\/comments$/.test(target)) {
+      const body = JSON.parse(String(options.body || "{}"));
+      postedInlineBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          id: 501,
+          html_url: "https://github.com/owner/repo/pull/8#discussion_r501",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "POST" && target === "https://api.github.com/graphql") {
+      const payload = JSON.parse(String(options.body || "{}"));
+      const query = String(payload.query || "");
+      const threadId = String(payload?.variables?.threadId || "");
+
+      if (query.includes("PullRequestReviewThreads")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null,
+                    },
+                    nodes: [
+                      {
+                        id: "thread-new",
+                        comments: {
+                          nodes: [{ databaseId: 501 }],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (query.includes("ResolveReviewThread")) {
+        threadMutations.push({ action: "resolve", threadId });
+        return new Response(
+          JSON.stringify({
+            data: {
+              resolveReviewThread: {
+                thread: {
+                  id: threadId,
+                  isResolved: true,
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (query.includes("UnresolveReviewThread")) {
+        threadMutations.push({ action: "unresolve", threadId });
+        return new Response(
+          JSON.stringify({
+            data: {
+              unresolveReviewThread: {
+                thread: {
+                  id: threadId,
+                  isResolved: false,
+                },
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+    }
+
+    if (method === "GET" && /\/pulls\/8$/.test(target)) {
+      return new Response(
+        JSON.stringify({
+          number: 8,
+          user: { login: "author" },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (method === "GET" && /\/pulls\/8\/reviews\?/.test(target)) {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected request ${method} ${target}`);
+  };
+
+  const commentPath = path.join(tempDir, "comment.md");
+  const ledgerPath = path.join(tempDir, "ledger.json");
+  const result = await runConsensus({
+    runId: "105",
+    sha: "abc999",
+    commentPath,
+    ledgerPath,
+    token: "token",
+    repo: "owner/repo",
+    prNumber: "8",
+    marker: "<!-- marker -->",
+    reportsDir,
+    reviewersJson: JSON.stringify([
+      {
+        id: "security",
+        display_name: "Security",
+      },
+    ]),
+    publishInlineComments: "true",
+    priorLedgerJson: priorLedgerPath,
+  });
+
+  assert.equal(result.outcome, "FAIL");
+  assert.equal(result.outcomeReason, "FAIL_OPEN_FINDINGS");
+  assert.equal(postedInlineBodies.length, 1);
+  assert.equal(postedInlineBodies[0].path, "src/new.ts");
+  assert.equal(postedInlineBodies[0].line, 9);
+  assert.deepEqual(threadMutations, [
+    {
+      action: "resolve",
+      threadId: "thread-resolve",
+    },
+    {
+      action: "unresolve",
+      threadId: "thread-reopen",
+    },
+  ]);
+
+  const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+  const sec1 = ledger.findings.find((finding) => finding.id === "SEC-1");
+  const sec2 = ledger.findings.find((finding) => finding.id === "SEC-2");
+  const sec3 = ledger.findings.find((finding) => finding.id === "SEC-3");
+  assert.equal(sec1.status, "resolved");
+  assert.equal(sec1.inline_thread_id, "thread-resolve");
+  assert.equal(sec2.status, "open");
+  assert.equal(sec2.inline_thread_id, "thread-reopen");
+  assert.equal(sec3.status, "open");
+  assert.equal(sec3.inline_comment_id, 501);
+  assert.equal(sec3.inline_thread_id, "thread-new");
 });

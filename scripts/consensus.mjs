@@ -21,6 +21,7 @@ import {
 } from "./shared/findings-ledger.mjs";
 import {
   githubGraphqlRequest,
+  githubRequest,
   githubRequestAllPages,
 } from "./shared/github-client.mjs";
 
@@ -222,6 +223,13 @@ function isNonBotUser(review) {
   return true;
 }
 
+const TRUSTED_APPROVER_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+function isTrustedApprover(review) {
+  const association = normalizeText(review?.author_association).toUpperCase();
+  return TRUSTED_APPROVER_ASSOCIATIONS.has(association);
+}
+
 function pickLatestReviewsByUser(reviews) {
   const latestByUser = new Map();
 
@@ -268,6 +276,12 @@ async function fetchHumanBypassApproval({ token, repo, prNumber, headSha }) {
 
   const { owner, name } = parseRepository(repo);
   const pullNumber = parsePullNumber(prNumber);
+  const pullRequest = await githubRequest({
+    method: "GET",
+    token: normalizedToken,
+    url: `https://api.github.com/repos/${owner}/${name}/pulls/${pullNumber}`,
+  });
+  const pullRequestAuthor = normalizeText(pullRequest?.user?.login).toLowerCase();
 
   const reviews = await githubRequestAllPages({
     token: normalizedToken,
@@ -280,9 +294,13 @@ async function fetchHumanBypassApproval({ token, repo, prNumber, headSha }) {
   for (const review of latestByUser.values()) {
     const state = String(review?.state || "").trim().toUpperCase();
     const commitId = normalizeText(review?.commit_id);
+    const approverLogin = normalizeText(review?.user?.login);
     if (state !== "APPROVED") continue;
     if (!commitId || commitId !== normalizedHeadSha) continue;
-    approvers.push(String(review?.user?.login || "").trim());
+    if (!approverLogin) continue;
+    if (pullRequestAuthor && approverLogin.toLowerCase() === pullRequestAuthor) continue;
+    if (!isTrustedApprover(review)) continue;
+    approvers.push(approverLogin);
   }
 
   return {
@@ -370,9 +388,16 @@ export async function runConsensus({
 
   const shouldPublishInlineComments = String(publishInlineComments ?? "true").toLowerCase() !== "false";
   const canUseGithub = normalizeText(token) && normalizeText(repo) && normalizeText(prNumber) && normalizeText(sha);
+  let findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
 
   if (shouldPublishInlineComments && canUseGithub) {
-    const newlyLineBound = merged.newlyOpenedEntries.filter((entry) => isLineBoundFinding(entry?.finding));
+    const newlyLineBound = merged.newlyOpenedEntries.filter((entry) => {
+      if (!isLineBoundFinding(entry?.finding)) return false;
+      const findingId = normalizeText(entry?.finding?.id).toUpperCase();
+      const existing = findingById.get(findingId);
+      // Reopened findings should keep using their existing thread instead of creating a new one.
+      return !normalizeText(existing?.inline_thread_id);
+    });
 
     if (newlyLineBound.length > 0) {
       const posted = await publishInlineFindingComments({
@@ -406,12 +431,11 @@ export async function runConsensus({
           ledger,
           entries: entriesWithThreadIds,
         });
+        findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
       }
     }
 
     // Keep comment thread lifecycle in sync with finding lifecycle transitions.
-    const findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
-
     for (const entry of merged.newlyResolvedEntries) {
       const findingId = normalizeText(entry?.finding?.id).toUpperCase();
       const finding = findingById.get(findingId);

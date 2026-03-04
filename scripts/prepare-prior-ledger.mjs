@@ -20,6 +20,10 @@ function emptyLedger() {
   };
 }
 
+function isLedgerObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function loadPriorLedger(sourceDir) {
   const normalizedSourceDir = normalizeText(sourceDir);
   if (!normalizedSourceDir) {
@@ -37,24 +41,24 @@ function loadPriorLedger(sourceDir) {
     };
   }
 
+  const sourceBody = fs.readFileSync(sourcePath, "utf8");
+  let parsed = null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.findings)) {
-      return {
-        ledger: {
-          version: 1,
-          findings: parsed.findings,
-        },
-        source: "artifact",
-      };
-    }
-  } catch {
-    // Fall through to empty ledger.
+    parsed = JSON.parse(sourceBody);
+  } catch (error) {
+    throw new Error(`Invalid prior ledger JSON at ${sourcePath}: ${error.message}`);
+  }
+
+  if (!isLedgerObject(parsed) || !Array.isArray(parsed.findings)) {
+    throw new Error(`Invalid prior ledger format at ${sourcePath}: expected object with findings array`);
   }
 
   return {
-    ledger: emptyLedger(),
-    source: "empty",
+    ledger: {
+      version: 1,
+      findings: parsed.findings,
+    },
+    source: "artifact",
   };
 }
 
@@ -88,3 +92,5 @@ if (isCliMain()) {
     process.exit(1);
   }
 }
+
+export { loadPriorLedger, main };

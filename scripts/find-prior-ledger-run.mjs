@@ -31,6 +31,14 @@ function parseRunId(value) {
   return parsed;
 }
 
+function parseOptionalRunId(value) {
+  const parsed = Number.parseInt(normalizeText(value), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
 async function githubGet({ token, url }) {
   const response = await fetch(url, {
     method: "GET",
@@ -58,11 +66,20 @@ async function findPriorLedgerRun({ token, repo, prNumber, currentRunId }) {
   const { owner, name } = parseRepository(repo);
   const normalizedPrNumber = parsePullNumber(prNumber);
   const normalizedCurrentRunId = parseRunId(currentRunId);
+  const currentRun = await githubGet({
+    token,
+    url: `https://api.github.com/repos/${owner}/${name}/actions/runs/${normalizedCurrentRunId}`,
+  });
+  const currentWorkflowId = parseOptionalRunId(currentRun?.workflow_id);
 
   for (let page = 1; page <= 5; page += 1) {
+    const runsUrl = currentWorkflowId
+      ? `https://api.github.com/repos/${owner}/${name}/actions/workflows/${currentWorkflowId}/runs?status=completed&per_page=100&page=${page}`
+      : `https://api.github.com/repos/${owner}/${name}/actions/runs?status=completed&per_page=100&page=${page}`;
+
     const runsPayload = await githubGet({
       token,
-      url: `https://api.github.com/repos/${owner}/${name}/actions/runs?event=pull_request&status=completed&per_page=100&page=${page}`,
+      url: runsUrl,
     });
 
     const workflowRuns = Array.isArray(runsPayload?.workflow_runs) ? runsPayload.workflow_runs : [];
@@ -73,6 +90,10 @@ async function findPriorLedgerRun({ token, repo, prNumber, currentRunId }) {
     const candidates = workflowRuns
       .filter((run) => Number(run?.id) < normalizedCurrentRunId)
       .filter((run) => runBelongsToPullRequest(run, normalizedPrNumber))
+      .filter((run) => {
+        if (!currentWorkflowId) return true;
+        return parseOptionalRunId(run?.workflow_id) === currentWorkflowId;
+      })
       .sort((left, right) => {
         const leftDate = Date.parse(left?.created_at || "");
         const rightDate = Date.parse(right?.created_at || "");
