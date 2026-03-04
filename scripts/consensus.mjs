@@ -10,6 +10,7 @@ import {
 } from "./shared/consensus-renderer.mjs";
 import {
   publishInlineFindingComments,
+  buildInlineCommentBody,
   isLineBoundFinding,
 } from "./shared/inline-review-comments.mjs";
 import { writeConsensusOutputs } from "./shared/consensus-output.mjs";
@@ -20,55 +21,9 @@ import {
   normalizeLedger,
 } from "./shared/findings-ledger.mjs";
 import {
-  githubGraphqlRequest,
   githubRequest,
   githubRequestAllPages,
 } from "./shared/github-client.mjs";
-
-const REVIEW_THREAD_IDS_QUERY = `
-  query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
-    repository(owner: $owner, name: $name) {
-      pullRequest(number: $number) {
-        reviewThreads(first: 100, after: $cursor) {
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-          nodes {
-            id
-            comments(first: 100) {
-              nodes {
-                databaseId
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
-const RESOLVE_REVIEW_THREAD_MUTATION = `
-  mutation ResolveReviewThread($threadId: ID!) {
-    resolveReviewThread(input: { threadId: $threadId }) {
-      thread {
-        id
-        isResolved
-      }
-    }
-  }
-`;
-
-const UNRESOLVE_REVIEW_THREAD_MUTATION = `
-  mutation UnresolveReviewThread($threadId: ID!) {
-    unresolveReviewThread(input: { threadId: $threadId }) {
-      thread {
-        id
-        isResolved
-      }
-    }
-  }
-`;
 
 function normalizeText(value) {
   return String(value ?? "")
@@ -150,6 +105,16 @@ function toPresentationEntries(ledgerFindings, status) {
     }));
 }
 
+function findingToCommentShape(finding) {
+  return {
+    id: normalizeText(finding?.id),
+    title: normalizeText(finding?.title) || "Untitled finding",
+    recommendation: normalizeText(finding?.recommendation) || "No recommendation provided.",
+    file: normalizeText(finding?.file) || null,
+    line: Number.isInteger(finding?.line) && finding.line > 0 ? finding.line : null,
+  };
+}
+
 export function readReportsForReviewers({ reportsDir, reviewers }) {
   const reports = {};
   for (const reviewer of reviewers) {
@@ -161,61 +126,26 @@ export function readReportsForReviewers({ reportsDir, reviewers }) {
   return reports;
 }
 
-async function fetchReviewThreadIdsByCommentId({
+async function updateInlineFindingComment({
   token,
-  owner,
-  name,
-  pullNumber,
+  repo,
+  commentId,
+  body,
 }) {
-  const map = new Map();
-  let cursor = null;
-
-  while (true) {
-    const data = await githubGraphqlRequest({
-      token,
-      query: REVIEW_THREAD_IDS_QUERY,
-      variables: {
-        owner,
-        name,
-        number: pullNumber,
-        cursor,
-      },
-    });
-
-    const connection = data?.repository?.pullRequest?.reviewThreads;
-    if (!connection) break;
-
-    for (const thread of connection.nodes || []) {
-      const threadId = normalizeText(thread?.id);
-      if (!threadId) continue;
-
-      for (const comment of thread?.comments?.nodes || []) {
-        const commentId = Number(comment?.databaseId);
-        if (Number.isInteger(commentId) && commentId > 0) {
-          map.set(commentId, threadId);
-        }
-      }
-    }
-
-    if (!connection.pageInfo?.hasNextPage) break;
-    cursor = connection.pageInfo.endCursor || null;
-  }
-
-  return map;
-}
-
-async function setReviewThreadResolved({ token, threadId, resolved }) {
-  const normalizedThreadId = normalizeText(threadId);
-  if (!normalizedThreadId) {
+  const normalizedCommentId = Number(commentId);
+  if (!Number.isInteger(normalizedCommentId) || normalizedCommentId <= 0) {
     return false;
   }
 
-  await githubGraphqlRequest({
+  const { owner, name } = parseRepository(repo);
+  await githubRequest({
+    method: "PATCH",
     token,
-    query: resolved ? RESOLVE_REVIEW_THREAD_MUTATION : UNRESOLVE_REVIEW_THREAD_MUTATION,
-    variables: { threadId: normalizedThreadId },
+    url: `https://api.github.com/repos/${owner}/${name}/pulls/comments/${normalizedCommentId}`,
+    body: {
+      body,
+    },
   });
-
   return true;
 }
 
@@ -400,8 +330,8 @@ export async function runConsensus({
       if (!isLineBoundFinding(entry?.finding)) return false;
       const findingId = normalizeText(entry?.finding?.id).toUpperCase();
       const existing = findingById.get(findingId);
-      // Reopened findings should keep using their existing thread instead of creating a new one.
-      return !normalizeText(existing?.inline_thread_id);
+      // Reopened findings should keep using their existing inline comment when available.
+      return !(Number.isInteger(existing?.inline_comment_id) && existing.inline_comment_id > 0);
     });
 
     if (newlyLineBound.length > 0) {
@@ -416,31 +346,9 @@ export async function runConsensus({
         });
 
         if (posted.postedEntries.length > 0) {
-          let threadIdsByCommentId = new Map();
-          try {
-            const { owner, name } = parseRepository(repo);
-            const pullNumber = parsePullNumber(prNumber);
-            threadIdsByCommentId = await fetchReviewThreadIdsByCommentId({
-              token,
-              owner,
-              name,
-              pullNumber,
-            });
-          } catch (error) {
-            logNonFatalGithubError("fetchReviewThreadIdsByCommentId", error);
-          }
-
-          const entriesWithThreadIds = posted.postedEntries.map((entry) => ({
-            ...entry,
-            inline_thread_id:
-              Number.isInteger(entry.comment_id) && threadIdsByCommentId.has(entry.comment_id)
-                ? threadIdsByCommentId.get(entry.comment_id)
-                : "",
-          }));
-
           ledger = applyInlineCommentMetadata({
             ledger,
-            entries: entriesWithThreadIds,
+            entries: posted.postedEntries,
           });
           findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
         }
@@ -449,28 +357,48 @@ export async function runConsensus({
       }
     }
 
-    // Keep comment thread lifecycle in sync with finding lifecycle transitions.
+    // Keep inline comment presentation in sync with finding lifecycle transitions.
     for (const entry of merged.newlyResolvedEntries) {
       const findingId = normalizeText(entry?.finding?.id).toUpperCase();
       const finding = findingById.get(findingId);
-      const threadId = normalizeText(finding?.inline_thread_id);
-      if (!threadId) continue;
+      const commentId = Number(finding?.inline_comment_id);
+      if (!Number.isInteger(commentId) || commentId <= 0) continue;
+      const reviewerLabel = normalizeText(labelsByReviewerId.get(finding.reviewer) || finding.reviewer || "Reviewer");
+      const body = `${buildInlineCommentBody({
+        reviewerLabel,
+        finding: findingToCommentShape(finding),
+      })}\n\nStatus: Resolved in latest run.`;
       try {
-        await setReviewThreadResolved({ token, threadId, resolved: true });
+        await updateInlineFindingComment({
+          token,
+          repo,
+          commentId,
+          body,
+        });
       } catch (error) {
-        logNonFatalGithubError("resolveReviewThread", error);
+        logNonFatalGithubError("updateResolvedInlineComment", error);
       }
     }
 
     for (const entry of merged.reopenedEntries) {
       const findingId = normalizeText(entry?.finding?.id).toUpperCase();
       const finding = findingById.get(findingId);
-      const threadId = normalizeText(finding?.inline_thread_id);
-      if (!threadId) continue;
+      const commentId = Number(finding?.inline_comment_id);
+      if (!Number.isInteger(commentId) || commentId <= 0) continue;
+      const reviewerLabel = normalizeText(labelsByReviewerId.get(finding.reviewer) || finding.reviewer || "Reviewer");
+      const body = buildInlineCommentBody({
+        reviewerLabel,
+        finding: findingToCommentShape(finding),
+      });
       try {
-        await setReviewThreadResolved({ token, threadId, resolved: false });
+        await updateInlineFindingComment({
+          token,
+          repo,
+          commentId,
+          body,
+        });
       } catch (error) {
-        logNonFatalGithubError("unresolveReviewThread", error);
+        logNonFatalGithubError("updateReopenedInlineComment", error);
       }
     }
   }

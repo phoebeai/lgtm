@@ -491,7 +491,7 @@ test("runConsensus returns PASS_HUMAN_BYPASS when non-bot approval exists on hea
   assert.deepEqual(result.humanBypass.approvers, ["bob"]);
 });
 
-test("runConsensus maps inline threads, resolves old threads, and unresolves reopened threads without duplicating reopen comments", async (t) => {
+test("runConsensus updates existing inline comments for resolved/reopened findings and avoids duplicate reopen comments", async (t) => {
   const tempDir = createTempDir(t, "consensus-inline-lifecycle-");
   const reportsDir = path.join(tempDir, "reports");
   fs.mkdirSync(reportsDir, { recursive: true });
@@ -535,7 +535,7 @@ test("runConsensus maps inline threads, resolves old threads, and unresolves reo
             recommendation: "Fix old issue",
             file: "src/old.ts",
             line: 3,
-            inline_thread_id: "thread-resolve",
+            inline_comment_id: 401,
           },
           {
             id: "SEC-2",
@@ -545,7 +545,7 @@ test("runConsensus maps inline threads, resolves old threads, and unresolves reo
             recommendation: "Keep fixed",
             file: "src/reopen.ts",
             line: 22,
-            inline_thread_id: "thread-reopen",
+            inline_comment_id: 402,
           },
         ],
       },
@@ -556,7 +556,7 @@ test("runConsensus maps inline threads, resolves old threads, and unresolves reo
   );
 
   const postedInlineBodies = [];
-  const threadMutations = [];
+  const patchedInlineComments = [];
   const originalFetch = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -581,81 +581,22 @@ test("runConsensus maps inline threads, resolves old threads, and unresolves reo
       );
     }
 
-    if (method === "POST" && target === "https://api.github.com/graphql") {
-      const payload = JSON.parse(String(options.body || "{}"));
-      const query = String(payload.query || "");
-      const threadId = String(payload?.variables?.threadId || "");
-
-      if (query.includes("PullRequestReviewThreads")) {
-        return new Response(
-          JSON.stringify({
-            data: {
-              repository: {
-                pullRequest: {
-                  reviewThreads: {
-                    pageInfo: {
-                      hasNextPage: false,
-                      endCursor: null,
-                    },
-                    nodes: [
-                      {
-                        id: "thread-new",
-                        comments: {
-                          nodes: [{ databaseId: 501 }],
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      }
-
-      if (query.includes("ResolveReviewThread")) {
-        threadMutations.push({ action: "resolve", threadId });
-        return new Response(
-          JSON.stringify({
-            data: {
-              resolveReviewThread: {
-                thread: {
-                  id: threadId,
-                  isResolved: true,
-                },
-              },
-            },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      }
-
-      if (query.includes("UnresolveReviewThread")) {
-        threadMutations.push({ action: "unresolve", threadId });
-        return new Response(
-          JSON.stringify({
-            data: {
-              unresolveReviewThread: {
-                thread: {
-                  id: threadId,
-                  isResolved: false,
-                },
-              },
-            },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      }
+    if (method === "PATCH" && /\/pulls\/comments\/(401|402)$/.test(target)) {
+      const body = JSON.parse(String(options.body || "{}"));
+      const commentId = Number(target.match(/\/pulls\/comments\/(\d+)$/)?.[1] || "0");
+      patchedInlineComments.push({
+        commentId,
+        body: String(body?.body || ""),
+      });
+      return new Response(
+        JSON.stringify({
+          id: commentId,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }
 
     if (method === "GET" && /\/pulls\/8$/.test(target)) {
@@ -708,32 +649,30 @@ test("runConsensus maps inline threads, resolves old threads, and unresolves reo
   assert.equal(postedInlineBodies.length, 1);
   assert.equal(postedInlineBodies[0].path, "src/new.ts");
   assert.equal(postedInlineBodies[0].line, 9);
-  assert.deepEqual(threadMutations, [
-    {
-      action: "resolve",
-      threadId: "thread-resolve",
-    },
-    {
-      action: "unresolve",
-      threadId: "thread-reopen",
-    },
-  ]);
+  assert.equal(patchedInlineComments.length, 2);
+  assert.deepEqual(
+    patchedInlineComments.map((entry) => entry.commentId).sort((left, right) => left - right),
+    [401, 402],
+  );
+  const resolvedPatch = patchedInlineComments.find((entry) => entry.commentId === 401);
+  const reopenedPatch = patchedInlineComments.find((entry) => entry.commentId === 402);
+  assert.match(resolvedPatch.body, /Status: Resolved in latest run\./);
+  assert.doesNotMatch(reopenedPatch.body, /Status: Resolved in latest run\./);
 
   const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
   const sec1 = ledger.findings.find((finding) => finding.id === "SEC-1");
   const sec2 = ledger.findings.find((finding) => finding.id === "SEC-2");
   const sec3 = ledger.findings.find((finding) => finding.id === "SEC-3");
   assert.equal(sec1.status, "resolved");
-  assert.equal(sec1.inline_thread_id, "thread-resolve");
+  assert.equal(sec1.inline_comment_id, 401);
   assert.equal(sec2.status, "open");
-  assert.equal(sec2.inline_thread_id, "thread-reopen");
+  assert.equal(sec2.inline_comment_id, 402);
   assert.equal(sec3.status, "open");
   assert.equal(sec3.inline_comment_id, 501);
-  assert.equal(sec3.inline_thread_id, "thread-new");
 });
 
-test("runConsensus tolerates non-fatal GitHub thread lifecycle API errors", async (t) => {
-  const tempDir = createTempDir(t, "consensus-non-fatal-thread-errors-");
+test("runConsensus tolerates non-fatal inline comment update API errors", async (t) => {
+  const tempDir = createTempDir(t, "consensus-non-fatal-comment-update-errors-");
   const reportsDir = path.join(tempDir, "reports");
   fs.mkdirSync(reportsDir, { recursive: true });
 
@@ -741,15 +680,8 @@ test("runConsensus tolerates non-fatal GitHub thread lifecycle API errors", asyn
     reportsDir,
     "security",
     baseReport({
-      new_findings: [
-        {
-          title: "New issue with comment",
-          file: "src/new.ts",
-          line: 9,
-          recommendation: "Fix new issue",
-          reopen_finding_id: null,
-        },
-      ],
+      resolved_finding_ids: ["SEC-1"],
+      new_findings: [],
     }),
   );
 
@@ -768,7 +700,7 @@ test("runConsensus tolerates non-fatal GitHub thread lifecycle API errors", asyn
             recommendation: "Fix old issue",
             file: "src/old.ts",
             line: 3,
-            inline_thread_id: "thread-resolve",
+            inline_comment_id: 777,
           },
         ],
       },
@@ -787,30 +719,11 @@ test("runConsensus tolerates non-fatal GitHub thread lifecycle API errors", asyn
     const method = options.method || "GET";
     const target = String(url);
 
-    if (method === "POST" && /\/pulls\/9\/comments$/.test(target)) {
+    if (method === "PATCH" && /\/pulls\/comments\/777$/.test(target)) {
       return new Response(
-        JSON.stringify({
-          id: 601,
-          html_url: "https://github.com/owner/repo/pull/9#discussion_r601",
-        }),
+        JSON.stringify({ message: "Resource not accessible by integration" }),
         {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    }
-
-    if (method === "POST" && target === "https://api.github.com/graphql") {
-      return new Response(
-        JSON.stringify({
-          errors: [
-            {
-              message: "Resource not accessible by integration",
-            },
-          ],
-        }),
-        {
-          status: 200,
+          status: 403,
           headers: { "content-type": "application/json" },
         },
       );
@@ -859,12 +772,13 @@ test("runConsensus tolerates non-fatal GitHub thread lifecycle API errors", asyn
     priorLedgerJson: priorLedgerPath,
   });
 
-  assert.equal(result.outcome, "FAIL");
-  assert.equal(result.outcomeReason, "FAIL_OPEN_FINDINGS");
+  assert.equal(result.outcome, "PASS");
+  assert.equal(result.outcomeReason, "PASS_NO_FINDINGS");
   assert.equal(result.reviewerErrorsCount, 0);
-  assert.equal(result.openFindingsCount, 2);
+  assert.equal(result.openFindingsCount, 0);
 
   const ledger = JSON.parse(fs.readFileSync(path.join(tempDir, "ledger.json"), "utf8"));
-  const sec2 = ledger.findings.find((finding) => finding.id === "SEC-2");
-  assert.equal(sec2.inline_comment_id, 601);
+  const sec1 = ledger.findings.find((finding) => finding.id === "SEC-1");
+  assert.equal(sec1.status, "resolved");
+  assert.equal(sec1.inline_comment_id, 777);
 });
