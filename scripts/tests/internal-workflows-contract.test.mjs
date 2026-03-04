@@ -30,11 +30,12 @@ test("ci workflow runs npm tests on all PR and main-branch push changes", () => 
   assert.ok(steps.includes("npm test"));
 });
 
-test("dogfood workflow calls reusable workflow with blocker-first gate settings", () => {
+test("dogfood workflow calls reusable workflow with gate settings and review-event refresh", () => {
   const dogfood = readWorkflowObject(DOGFOOD_WORKFLOW_PATH);
 
   assert.equal(dogfood.name, "Dogfood");
   assert.ok(dogfood.on.pull_request);
+  assert.deepEqual(dogfood.on.pull_request_review.types, ["submitted", "edited", "dismissed"]);
   assert.ok(dogfood.on.workflow_dispatch?.inputs?.pull_request_number);
 
   const job = dogfood.jobs.dogfood;
@@ -56,7 +57,11 @@ test("reusable lgtm workflow runs as a single LGTM job", () => {
   assert.equal(lgtm.jobs.lgtm.name, "LGTM");
   assert.match(
     workflowText,
-    /Collect prior finding memory[\s\S]*?node workflow-src\/scripts\/collect-pr-finding-memory\.mjs/,
+    /Find prior ledger artifact run[\s\S]*?node workflow-src\/scripts\/find-prior-ledger-run\.mjs/,
+  );
+  assert.match(
+    workflowText,
+    /Prepare prior ledger[\s\S]*?node workflow-src\/scripts\/prepare-prior-ledger\.mjs/,
   );
   assert.match(
     workflowText,
@@ -68,7 +73,7 @@ test("reusable lgtm workflow runs as a single LGTM job", () => {
   );
   assert.match(
     workflowText,
-    /Compute pass\/fail consensus[\s\S]*?PRIOR_FINDINGS_JSON:\s*\$\{\{\s*runner\.temp\s*\}\}\/lgtm-prior-findings\.json/,
+    /Compute pass\/fail consensus[\s\S]*?PRIOR_LEDGER_JSON:\s*\$\{\{\s*steps\.prior_ledger\.outputs\.prior_ledger_json\s*\}\}/,
   );
 });
 
@@ -107,6 +112,7 @@ test("smoke-consumer workflow pins reusable workflow to v1 and grants required p
   assert.equal(workflow.permissions?.contents, "read");
   assert.equal(workflow.permissions?.["pull-requests"], "write");
   assert.equal(workflow.permissions?.actions, "read");
+  assert.deepEqual(workflow.on?.pull_request_review?.types, ["submitted", "edited", "dismissed"]);
 });
 
 test("reviewer output schema allows dynamic reviewer ids", () => {

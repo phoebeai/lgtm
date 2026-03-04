@@ -22,14 +22,18 @@ test("persistConsensusArtifacts writes merged files and copies per-reviewer repo
   const commentPath = path.join(runnerTemp, "comment.md");
   fs.writeFileSync(commentPath, "<!-- codex-lgtm -->\nhello\n", "utf8");
 
+  const ledgerPath = path.join(runnerTemp, "findings-ledger.json");
+  fs.writeFileSync(ledgerPath, '{"version":1,"findings":[]}\n', "utf8");
+
   persistConsensusArtifacts({
     runnerTemp,
     reviewersJson: JSON.stringify([{ id: "security" }, { id: "test_quality" }]),
     consensusReports: '{"security":{"run_state":"completed"}}',
     outcome: "PASS",
-    blockingFindingsCount: "0",
+    openFindingsCount: "0",
     reviewerErrorsCount: "0",
     commentPath,
+    ledgerPath,
   });
 
   const outputDir = path.join(runnerTemp, "lgtm");
@@ -44,6 +48,10 @@ test("persistConsensusArtifacts writes merged files and copies per-reviewer repo
   );
   assert.equal(fs.readFileSync(path.join(outputDir, "outcome.txt"), "utf8"), "PASS\n");
   assert.equal(
+    fs.readFileSync(path.join(outputDir, "open-findings-count.txt"), "utf8"),
+    "0\n",
+  );
+  assert.equal(
     fs.readFileSync(path.join(outputDir, "blocking-findings-count.txt"), "utf8"),
     "0\n",
   );
@@ -55,6 +63,10 @@ test("persistConsensusArtifacts writes merged files and copies per-reviewer repo
     fs.readFileSync(path.join(outputDir, "comment.md"), "utf8"),
     "<!-- codex-lgtm -->\nhello\n",
   );
+  assert.equal(
+    fs.readFileSync(path.join(outputDir, "findings-ledger.json"), "utf8"),
+    '{"version":1,"findings":[]}\n',
+  );
 });
 
 test("persistConsensusArtifacts rejects malformed reviewer JSON", () => {
@@ -65,9 +77,10 @@ test("persistConsensusArtifacts rejects malformed reviewer JSON", () => {
         reviewersJson: "{bad json",
         consensusReports: "{}",
         outcome: "PASS",
-        blockingFindingsCount: "0",
+        openFindingsCount: "0",
         reviewerErrorsCount: "0",
         commentPath: "/tmp/comment.md",
+        ledgerPath: "/tmp/findings-ledger.json",
       }),
     /Invalid REVIEWERS_JSON/,
   );

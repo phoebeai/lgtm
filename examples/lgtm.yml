@@ -7,17 +7,14 @@ reviewers:
     display_name: Security
     prompt_file: examples/prompts/default/security.md
     scope: security risk
-    required: true
   - id: test_quality
     display_name: Test Quality
     prompt_file: examples/prompts/default/test-quality.md
     scope: test quality and coverage risk
-    required: false
   - id: infrastructure
     display_name: Infrastructure
     prompt_file: examples/prompts/default/infrastructure.md
     scope: infrastructure and deployment risk
-    required: false
     paths:
       - src/infrastructure/**
       - src/**/migrations/**
@@ -26,4 +23,3 @@ reviewers:
     display_name: Code Quality
     prompt_file: examples/prompts/default/code-quality.md
     scope: maintainability and architecture quality risk
-    required: false

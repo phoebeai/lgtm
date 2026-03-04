@@ -4,22 +4,20 @@
 -- LGTM: automated multi-reviewer code review pipeline
 --
 -- Multiple independent AI reviewers examine changed files in a PR,
--- produce structured findings, and a consensus step determines
--- whether the PR passes or fails. Previously posted findings are
--- collected as memory to avoid duplicate reporting. Line-bound
--- blocking findings are posted as inline PR comments with HMAC
--- signatures. A sticky summary comment is maintained on the PR.
+-- produce structured lifecycle updates, and a merge step updates a
+-- findings ledger. Comments are presentation only and no longer drive
+-- gate logic. Line-bound findings are rendered as inline comments,
+-- while all findings appear in the sticky summary comment.
 --
 -- Scope: Full review lifecycle from PR event through gate enforcement
--- Includes: Trusted config loading, prior finding memory, reviewer
---           orchestration via Codex, finding normalization, consensus,
---           inline comment publishing, sticky comment
---           upsertion, gate enforcement
+-- Includes: Trusted config loading, prior ledger restore, reviewer
+--           orchestration via Codex, reviewer output normalization,
+--           ledger merge, inline/sticky comment publishing,
+--           human-approval bypass, gate enforcement
 -- Excludes:
 --   - CI platform workflow wiring (GitHub Actions step orchestration)
---   - Artifact persistence and upload
---   - Comment body markdown formatting details
---   - JSON schema compilation mechanics
+--   - Artifact upload mechanics
+--   - Markdown formatting details
 
 ------------------------------------------------------------
 -- Enumerations
@@ -29,40 +27,62 @@ enum RunState { completed | skipped | error }
 
 enum Outcome { pass | fail }
 
+enum OutcomeReason {
+    PASS_NO_FINDINGS |
+    PASS_HUMAN_BYPASS |
+    FAIL_OPEN_FINDINGS |
+    FAIL_REVIEWER_ERRORS
+}
+
+enum FindingStatus { open | resolved }
+
 ------------------------------------------------------------
 -- Value Types
 ------------------------------------------------------------
 
-value PriorFindingEntry {
-    id: Integer
-    path: String
+value ReviewerFinding {
+    title: String
+    file: String?
     line: Integer?
-    resolved: Boolean?           -- from GitHub review thread resolution
-    author: String
+    recommendation: String
+    reopen_finding_id: String?    -- when set, reopen/update prior finding id
+}
+
+value ReviewConfig {
+    version: Integer              -- currently 1
+    defaults: ConfigDefaults?
+    reviewers: List<Reviewer>
+}
+
+value ConfigDefaults {
+    model: String?
+    effort: String?
+}
+
+-- Finding IDs use a prefix derived from the reviewer id plus a
+-- monotonic sequence number: {PREFIX}-{N}.
+-- Known prefixes: security→SEC, test_quality→TQ, code_quality→CQ,
+-- infrastructure→INF. Unknown reviewer ids derive a prefix from
+-- word initials or the first three characters.
+
+value LedgerFinding {
+    id: String                    -- e.g. SEC-3, TQ-1, CQ-2
+    reviewer: String              -- reviewer id
+    status: FindingStatus
+    title: String
+    file: String?
+    line: Integer?
+    recommendation: String
+    created_run_id: String
     created_at: String
+    updated_run_id: String
     updated_at: String
-    url: String
-    body: String                 -- normalized comment body (signatures stripped)
+    resolved_at: String?
 
-    is_blocking: Boolean         -- derived from body: headline contains "(blocking)"
-}
-
-value FindingEntry {
-    reviewer_id: String
-    reviewer_label: String
-    reviewer_required: Boolean
-    finding: Finding
-}
-
-------------------------------------------------------------
--- External Entities
-------------------------------------------------------------
-
-external entity PullRequest {
-    number: Integer
-    repository: String           -- owner/name
-    base_sha: String
-    head_sha: String
+    -- presentation linkage (comment lifecycle; non-gating)
+    inline_comment_id: Integer?
+    inline_comment_url: String
+    inline_thread_id: String
 }
 
 ------------------------------------------------------------
@@ -74,124 +94,54 @@ entity Reviewer {
     display_name: String
     prompt_file: String          -- relative path; no parent traversal, no control chars
     scope: String                -- natural language review focus
-    required: Boolean            -- default true; required reviewers gate merge
     paths: List<String>          -- glob patterns; empty = all changed files
-
-    has_path_filters: paths.count > 0
-}
-
-entity ReviewRun {
-    pull_request: PullRequest
-    reviewers: Set<Reviewer>
-    resolved_model: String
-    resolved_effort: String
-    prior_findings: List<PriorFindingEntry>
-    publish_comment: Boolean
-    publish_inline_comments: Boolean
-    enforce_gate: Boolean
-    outcome: Outcome?
-
-    -- Relationships
-    reports: ReviewerReport with run = this
-    inline_comments: InlineComment with run = this
-
-    -- Projections
-    active_reports: reports where run_state != skipped
-    required_active: active_reports where reviewer.required = true
-    errored_required: required_active where run_state = error
-    required_with_blocking: required_active where has_blocking_findings
-    optional_active: active_reports where reviewer.required = false
-    errored_optional: optional_active where run_state = error
-    optional_with_blocking: optional_active where has_blocking_findings
-
-    -- Carryover: prior blocking inline findings not yet resolved
-    unresolved_blocking_prior: prior_findings
-        .filter(pf => pf.resolved = false and pf.is_blocking)
-
-    -- Derived
-    all_reports_resolved: reports.all(r => r.run_state != null)
-    has_required_failures:
-        errored_required.count > 0
-        or required_with_blocking.count > 0
-        or unresolved_blocking_prior.count > 0
 }
 
 entity ReviewerReport {
-    run: ReviewRun
     reviewer: Reviewer
-    scoped_files: Set<String>    -- changed files matching reviewer path filters
-    run_state: RunState?
-    summary: String?
+    run_state: RunState
+    summary: String
+    resolved_finding_ids: List<String>
+    new_findings: List<ReviewerFinding>
     errors: List<String>
-
-    -- Relationships
-    findings: Finding with report = this
-
-    -- Projections
-    blocking_findings: findings where blocking = true
-    non_blocking_findings: findings where blocking = false
-
-    -- Derived
-    has_blocking_findings: blocking_findings.count > 0
 }
 
-entity Finding {
-    report: ReviewerReport
-    title: String
-    file: String?
-    line: Integer?               -- positive when present
-    recommendation: String       -- concrete remediation guidance
-    blocking: Boolean            -- true = merge should be blocked
-
-    is_line_bound: file != null and line != null and line > 0
+entity FindingsLedger {
+    version: Integer             -- currently 1
+    findings: List<LedgerFinding>
 }
 
-entity InlineComment {
-    run: ReviewRun
-    finding_entry: FindingEntry
-    path: String
-    line: Integer
-    body: String                 -- includes HMAC signature marker
-    signature: String            -- HMAC-SHA256 of normalized body
-    is_new: Boolean              -- always true (no post-generation suppression)
-}
+entity ReviewRun {
+    pull_request_number: Integer
+    repository: String           -- owner/name
+    base_sha: String
+    head_sha: String
+    run_id: String
 
-entity StickyComment {
-    pull_request: PullRequest
-    body: String
-    marker: String
-    action: created | updated
+    reviewers: Set<Reviewer>
+    reports: List<ReviewerReport>
+
+    prior_ledger: FindingsLedger
+    merged_ledger: FindingsLedger
+
+    reviewer_errors: List<String>
+    open_findings: List<LedgerFinding>
+    resolved_findings: List<LedgerFinding>
+
+    human_bypass_approved: Boolean
+    human_bypass_approvers: List<String>
+
+    outcome: Outcome
+    outcome_reason: OutcomeReason
 }
 
 ------------------------------------------------------------
--- Config
+-- Rules: Trusted Preparation
 ------------------------------------------------------------
 
-config {
-    fallback_model: String                   -- environment-supplied; no built-in default
-    fallback_effort: String                  -- environment-supplied; no built-in default
-    comment_marker: String = "<!-- codex-lgtm -->"
-    reviewer_timeout: Duration = 10.minutes
-}
+rule PrepareConfig {
+    when: PRReviewRequested(pull_request, config_path, model?, effort?)
 
-------------------------------------------------------------
--- Rules: Preparation
-------------------------------------------------------------
-
--- TRUST INVARIANT
--- Configuration and reviewer prompt files are loaded from the PR base
--- revision (base_sha), never from the PR branch. This prevents a PR
--- author from weakening review rules for the PR under review.
-
-rule PrepareReviewRun {
-    when: PRReviewRequested(
-        pull_request,
-        config_path,
-        model?, effort?,
-        publish_comment?, publish_inline_comments?, enforce_gate?
-    )
-
-    -- Config loaded from base branch (trust boundary)
     requires: is_safe_relative_path(config_path)
     requires: git_blob_exists(pull_request.base_sha, config_path)
 
@@ -200,382 +150,203 @@ rule PrepareReviewRun {
     requires: config.version = 1
     requires: config.reviewers.count >= 1
 
-    -- Every reviewer prompt must exist in base revision
     requires:
         for r in config.reviewers:
             is_safe_relative_path(r.prompt_file)
             and git_blob_exists(pull_request.base_sha, r.prompt_file)
 
-    -- Resolution chain: workflow input > config default > fallback
-    let resolved_model = coalesce(model, config.default_model, fallback_model)
-    let resolved_effort = coalesce(effort, config.default_effort, fallback_effort)
+    -- Model/effort resolution: input overrides config defaults, which
+    -- override a built-in fallback. At least one source must provide
+    -- a value for each.
+    let resolved_model = model ?? config.defaults?.model ?? fallback_model
+    let resolved_effort = effort ?? config.defaults?.effort ?? fallback_effort
 
     requires: resolved_model != null
     requires: resolved_effort != null
 
-    ensures: ConfigLoaded(
-        pull_request: pull_request,
-        config: config,
-        resolved_model: resolved_model,
-        resolved_effort: resolved_effort,
-        publish_comment: publish_comment ?? true,
-        publish_inline_comments: publish_inline_comments ?? true,
-        enforce_gate: enforce_gate ?? true
-    )
+    ensures: ConfigLoaded(config, pull_request, resolved_model, resolved_effort)
 }
 
 ------------------------------------------------------------
--- Rules: Prior Finding Memory
+-- Rules: Prior Ledger Restore
 ------------------------------------------------------------
 
--- Previously posted finding comments are collected from the PR so
--- reviewers avoid reporting the same issues again. Only bot-authored
--- comments with valid HMAC signatures are trusted.
+-- Source: latest completed LGTM artifact run for the same PR.
+-- If missing/unreadable, fallback to empty ledger.
 
-rule CollectPriorFindingMemory {
-    when: ConfigLoaded(
-        pull_request, config, resolved_model, resolved_effort,
-        publish_comment, publish_inline_comments, enforce_gate
+rule RestorePriorLedger {
+    when: ConfigLoaded(config, pull_request, resolved_model, resolved_effort)
+
+    let prior_ledger = actions_restore_prior_lgtm_ledger(
+        repository: pull_request.repository,
+        pull_request_number: pull_request.number
     )
 
-    -- Fetch all inline review comments on the PR (paginated)
-    let all_review_comments = github_list_pr_review_comments(pull_request)
-
-    -- Fetch per-comment thread resolution status
-    let resolution_by_id = github_fetch_review_thread_resolutions(pull_request)
-
-    -- Filter to trusted finding comments
-    let prior_findings = all_review_comments
-        .filter(c =>
-            c.author_login.ends_with("[bot]")
-            and hmac_sha256_verify(
-                body: normalize_finding_comment_body(c.body),
-                signature: extract_finding_signature(c.body)
-            )
-            and is_finding_comment_body(c.body)
-        )
-        .map(c => PriorFindingEntry(
-            id: c.id,
-            path: c.path,
-            line: c.line,
-            resolved: resolution_by_id.get(c.id),
-            author: c.author_login,
-            created_at: c.created_at,
-            updated_at: c.updated_at,
-            url: c.html_url,
-            body: normalize_finding_comment_body(c.body)
-        ))
-        .sort_by(e => e.updated_at)
-
-    ensures: PriorFindingsReady(
-        pull_request: pull_request,
-        config: config,
-        resolved_model: resolved_model,
-        resolved_effort: resolved_effort,
-        prior_findings: prior_findings,
-        publish_comment: publish_comment,
-        publish_inline_comments: publish_inline_comments,
-        enforce_gate: enforce_gate
-    )
+    ensures: PriorLedgerReady(config, pull_request, prior_ledger, resolved_model, resolved_effort)
 }
 
 ------------------------------------------------------------
--- Rules: Reviewer Scoping and Execution
+-- Rules: Reviewer Execution
 ------------------------------------------------------------
 
--- Each reviewer runs in parallel. Changed files are determined from
--- the PR range (base...head) and filtered by reviewer path globs.
--- When no files match, the reviewer is skipped.
+-- Reviewers receive scoped changed files and prior ledger entries
+-- for their reviewer id. Reviewer output contract:
+--   - resolved_finding_ids
+--   - new_findings
+--   - errors
 --
--- Active reviewers receive a composite prompt built from:
---   1. Reviewer identity, scope, and PR context (base/head SHAs)
---   2. Scoped changed files (JSON-encoded; paths sanitised against
---      control characters to prevent prompt injection)
---   3. Prior findings for scoped files
---   4. Trusted reviewer instructions from the base-branch prompt file
---
--- Reviewers run via Codex in read-only sandbox with non-interactive
--- execution and a per-reviewer timeout.
+-- Execution constraints:
+--   - Reviewers run in read-only sandbox (no filesystem writes)
+--   - Non-interactive: no approval prompts
+--   - Per-reviewer timeout (default 10 minutes)
 
-rule ScopeAndRunReviewers {
-    when: PriorFindingsReady(
-        pull_request, config, resolved_model, resolved_effort,
-        prior_findings, publish_comment, publish_inline_comments, enforce_gate
-    )
+rule RunReviewers {
+    when: PriorLedgerReady(config, pull_request, prior_ledger, resolved_model, resolved_effort)
 
     let changed_files = git_diff_file_names(pull_request.base_sha, pull_request.head_sha)
 
     ensures:
-        let run = ReviewRun.created(
-            pull_request: pull_request,
-            reviewers: config.reviewers,
-            resolved_model: resolved_model,
-            resolved_effort: resolved_effort,
-            prior_findings: prior_findings,
-            publish_comment: publish_comment,
-            publish_inline_comments: publish_inline_comments,
-            enforce_gate: enforce_gate
-        )
         for reviewer in config.reviewers:
-            let scoped = filter_by_globs(changed_files, reviewer.paths)
-            if scoped.count = 0:
+            let scoped_files = filter_by_globs(changed_files, reviewer.paths)
+            let prior_for_reviewer = prior_ledger.findings
+                .filter(f => f.reviewer = reviewer.id)
+                .filter(f => f.file = null or f.file in scoped_files)
+
+            if scoped_files.count = 0:
                 ReviewerReport.created(
-                    run: run,
                     reviewer: reviewer,
-                    scoped_files: {},
                     run_state: skipped,
-                    summary: "Skipped (no relevant changes)"
+                    summary: "Skipped (no relevant changes)",
+                    resolved_finding_ids: [],
+                    new_findings: [],
+                    errors: []
                 )
             else:
-                let report = ReviewerReport.created(
-                    run: run,
-                    reviewer: reviewer,
-                    scoped_files: scoped
-                )
-                -- Scope prior findings to this reviewer's files
-                let scoped_prior = prior_findings
-                    .filter(pf => pf.path in scoped)
-
-                -- Load prompt from trusted base revision
-                let prompt_instructions = git_read_blob(
-                    pull_request.base_sha,
-                    reviewer.prompt_file
-                )
-
                 ReviewerExecutionRequested(
-                    report: report,
-                    model: resolved_model,
-                    effort: resolved_effort,
-                    scoped_files: scoped,
-                    prior_findings: scoped_prior,
-                    prompt_instructions: prompt_instructions
+                    reviewer: reviewer,
+                    scoped_files: scoped_files,
+                    prior_findings: prior_for_reviewer,
+                    prompt_instructions: git_read_blob(pull_request.base_sha, reviewer.prompt_file),
+                    sandbox_mode: read_only,
+                    approval_policy: never,
+                    timeout: reviewer_timeout
                 )
 }
 
--- Codex returns structured output conforming to the finding schema
-
-rule ReviewerCompletes {
-    when: ReviewerOutputReceived(report, output)
-    requires: report.run_state = null
-
-    ensures: report.run_state = completed
-    ensures: report.summary = output.summary
-    ensures:
-        for f in output.findings:
-            Finding.created(
-                report: report,
-                title: f.title,
-                file: f.file,
-                line: f.line,
-                recommendation: f.recommendation,
-                blocking: f.blocking
-            )
-}
-
--- Timeout, empty output, or unparseable output yields an error report.
--- Output extraction tries: direct JSON, markdown fences, brace
--- extraction, per-line JSON. Failure after all attempts is an error.
-
-rule ReviewerErrors {
-    when: ReviewerOutputFailed(report, reasons)
-    requires: report.run_state = null
-
-    ensures: report.run_state = error
-    ensures: report.summary = "Reviewer output unavailable or invalid"
-    ensures: report.errors = reasons
-}
-
 ------------------------------------------------------------
--- Rules: Consensus
+-- Rules: Ledger Merge
 ------------------------------------------------------------
 
--- Outcome depends on required reviewers that were active (not
--- skipped) plus any unresolved prior blocking inline findings.
---   FAIL if any required reviewer errored.
---   FAIL if any required reviewer produced a blocking finding.
---   FAIL if any prior blocking inline finding is unresolved.
---   PASS otherwise.
--- Optional reviewers are reported but never affect the outcome.
+-- Only completed reports are merged. Skipped and errored reports
+-- do not modify the ledger.
 --
--- Findings are ordered deterministically by title, reviewer, file, line.
-
-rule ComputeConsensus {
-    when: run: ReviewRun.all_reports_resolved
-
-    ensures:
-        if run.has_required_failures:
-            run.outcome = fail
-        else:
-            run.outcome = pass
-}
-
-------------------------------------------------------------
--- Rules: Inline Comment Publishing
-------------------------------------------------------------
-
--- Line-bound blocking findings from the current run's required
--- reviewers are posted as inline PR review comments. Carryover
--- findings (unresolved prior inline findings) are not re-posted.
--- Each comment body is HMAC-SHA256 signed so the system can later
--- identify its own comments for prior finding memory.
-
-rule PublishInlineFindings {
-    when: run: ReviewRun.outcome != null
-    requires: run.publish_inline_comments = true
-
-    -- Only required reviewers' blocking findings are posted inline
-    let all_blocking = run.required_with_blocking
-        .flat_map(r =>
-            r.blocking_findings.map(f => FindingEntry(
-                reviewer_id: r.reviewer.id,
-                reviewer_label: r.reviewer.display_name,
-                reviewer_required: true,
-                finding: f
-            ))
-        )
-
-    let line_bound = all_blocking.filter(e => e.finding.is_line_bound)
-
-    ensures:
-        for entry in line_bound:
-            let body = compose_inline_finding_body(
-                reviewer_label: entry.reviewer_label,
-                finding_kind: "blocking",
-                title: entry.finding.title,
-                recommendation: entry.finding.recommendation
-            )
-            let signature = hmac_sha256_sign(normalize_finding_comment_body(body))
-            let signed_body = body + "\n\n<!-- codex-inline-finding sig=" + signature + " -->"
-
-            InlineComment.created(
-                run: run,
-                finding_entry: entry,
-                path: entry.finding.file,
-                line: entry.finding.line,
-                body: signed_body,
-                signature: signature,
-                is_new: true
-            )
-
-            github_post_pr_review_comment(
-                pull_request: run.pull_request,
-                commit_sha: run.pull_request.head_sha,
-                path: entry.finding.file,
-                line: entry.finding.line,
-                side: right,
-                body: signed_body
-            )
-}
-
-------------------------------------------------------------
--- Rules: Sticky Comment
-------------------------------------------------------------
-
--- A single summary comment is maintained on the PR. Identified
--- by a hidden HTML marker. If an existing comment with the marker
--- is found from a bot author, it is updated; otherwise a new comment
--- is created.
+-- Merge behavior per completed reviewer report:
+--   1) For resolved_finding_ids: mark matching open findings as
+--      resolved, but only if the finding belongs to the same reviewer.
+--   2) For each new_finding:
+--      - if reopen_finding_id matches a prior finding owned by
+--        the same reviewer, reopen/update that finding id.
+--      - otherwise allocate next finding id using reviewer prefix
+--        (SEC-*, TQ-*, CQ-*, INF-*, ...).
 --
--- Comment body:
---   PASS: "LGTM" with "No blocking issues found."
---   FAIL: "LGTM" with blocking issue count, then:
---         - Blocking reviewer errors section
---         - Blocking findings section
+-- A reviewer can only resolve or reopen its own findings.
+-- Findings not mentioned remain in current state.
 
-rule UpsertStickyComment {
-    when: run: ReviewRun.outcome != null
-    requires: run.publish_comment = true
+rule MergeLedger {
+    when: ReportsReady(reports, prior_ledger)
 
-    let report_blocking = run.required_with_blocking
-        .flat_map(r =>
-            r.blocking_findings.map(f => FindingEntry(
-                reviewer_id: r.reviewer.id,
-                reviewer_label: r.reviewer.display_name,
-                reviewer_required: true,
-                finding: f
-            ))
+    let completed_reports = reports.filter(r => r.run_state = completed)
+
+    ensures: merged_ledger = merge(prior_ledger, completed_reports)
+    ensures: open_findings = merged_ledger.findings.filter(f => f.status = open)
+    ensures: resolved_findings = merged_ledger.findings.filter(f => f.status = resolved)
+}
+
+------------------------------------------------------------
+-- Rules: Comment Lifecycle (Presentation Only)
+------------------------------------------------------------
+
+-- Comments are no longer a source of truth for gate decisions.
+-- They mirror ledger transitions:
+--   - post inline comments only for newly opened line-bound findings
+--   - resolve thread on finding resolution
+--   - unresolve thread on finding reopen
+
+rule SyncInlineCommentLifecycle {
+    when: merged_ledger != null
+
+    ensures:
+        post_inline_comments_for_new_line_bound_findings(merged_ledger)
+        resolve_threads_for_newly_resolved_findings(merged_ledger)
+        unresolve_threads_for_reopened_findings(merged_ledger)
+}
+
+rule UpsertStickySummary {
+    when: merged_ledger != null
+
+    ensures:
+        sticky_comment_contains(
+            marker: "<!-- codex-lgtm -->",
+            outcome_banner: outcome,
+            human_bypass_section: human_bypass,
+            reviewer_errors_section: reviewer_errors,
+            open_findings_section: open_findings,
+            resolved_findings_section: resolved_findings
         )
+}
 
-    -- Carryover: unresolved prior blocking findings (already posted)
-    let carryover_blocking = run.unresolved_blocking_prior
-        .map(pf => FindingEntry(
-            reviewer_id: pf.author,
-            reviewer_label: pf.parsed_reviewer_label,
-            reviewer_required: true,
-            finding: pf.parsed_finding
-        ))
+------------------------------------------------------------
+-- Rules: Human Bypass + Gate
+------------------------------------------------------------
 
-    let blocking_entries = report_blocking + carryover_blocking
+-- Human bypass:
+--   Any non-bot APPROVED review on the current head SHA counts.
+--   Stale and dismissed approvals are excluded.
+--   Bypass overrides reviewer errors and open findings.
 
-    let reviewer_errors = run.errored_required
+rule ComputeOutcome {
+    when: merged_ledger != null
+
+    let reviewer_errors = reports
+        .filter(r => r.run_state = error)
         .map(r => r.reviewer.id + ": reviewer execution/output error")
 
-    let body = compose_sticky_comment_body(
-        marker: comment_marker,
-        outcome: run.outcome,
-        blocking_entries: blocking_entries,
-        reviewer_errors: reviewer_errors
-    )
-
-    -- Search issue comments for existing LGTM comment by a trusted author
-    -- Trusted authors: "github-actions[bot]" and the current workflow actor
-    let existing_comments = github_list_issue_comments(run.pull_request)
-    let existing = existing_comments.find(c =>
-        c.author_login in trusted_bot_logins
-        and c.body.contains(comment_marker)
+    let bypass = github_has_human_approval_on_head(
+        repository,
+        pull_request_number,
+        head_sha
     )
 
     ensures:
-        if existing != null:
-            github_update_issue_comment(existing.id, body)
-            StickyComment.created(
-                pull_request: run.pull_request,
-                body: body,
-                marker: comment_marker,
-                action: updated
-            )
+        if bypass = true:
+            outcome = pass
+            outcome_reason = PASS_HUMAN_BYPASS
+        else if reviewer_errors.count > 0:
+            outcome = fail
+            outcome_reason = FAIL_REVIEWER_ERRORS
+        else if open_findings.count > 0:
+            outcome = fail
+            outcome_reason = FAIL_OPEN_FINDINGS
         else:
-            github_create_issue_comment(run.pull_request, body)
-            StickyComment.created(
-                pull_request: run.pull_request,
-                body: body,
-                marker: comment_marker,
-                action: created
-            )
+            outcome = pass
+            outcome_reason = PASS_NO_FINDINGS
 }
-
-------------------------------------------------------------
--- Rules: Gate Enforcement
-------------------------------------------------------------
 
 rule EnforceGate {
-    when: run: ReviewRun.outcome != null
-    requires: run.enforce_gate = true
-    requires: run.outcome = fail
+    when: outcome != null and enforce_gate = true
+    requires: outcome = fail
 
-    ensures: PipelineFailed(run: run)
+    ensures: PipelineFailed()
 }
 
-rule GatePasses {
-    when: run: ReviewRun.outcome != null
-    requires: run.enforce_gate = true
-    requires: run.outcome = pass
+rule PersistRunArtifacts {
+    when: outcome != null
 
-    ensures: PipelinePassed(run: run)
+    ensures:
+        write_artifact("findings-ledger.json", merged_ledger)
+        write_artifact("comment.md", sticky_comment)
+        write_artifact("reports-merged.json", reports)
+        write_artifact("outcome.txt", outcome)
+        write_artifact("open-findings-count.txt", open_findings.count)
+        write_artifact("reviewer-errors-count.txt", reviewer_errors.count)
 }
-
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
--- OQ-1: Should reviewer timeout produce a specific error reason
---        distinct from output parse failure? Currently both map
---        to run_state = error with different error strings.
---
--- OQ-3: Prior finding memory includes both resolved and unresolved
---        findings. Should resolved findings be excluded to allow
---        re-reporting if the fix was reverted?
---
--- OQ-4: Optional reviewer blocking findings are currently tracked
---        but not included in the sticky comment body. Should they
---        appear in a separate non-blocking section?

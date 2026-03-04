@@ -2,60 +2,60 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeFindingLenient,
-  normalizeFindingsStrict,
+  normalizeNewFindingsStrict,
   normalizePersistedReviewerReport,
+  normalizeResolvedFindingIdsStrict,
   normalizeStructuredReviewerPayload,
 } from "../shared/reviewer-core.mjs";
 
-function buildFinding(overrides = {}) {
+function buildNewFinding(overrides = {}) {
   return {
     title: "Example finding",
     recommendation: "Fix the issue.",
-    blocking: true,
     ...overrides,
   };
 }
 
-test("normalizeFindingsStrict accepts optional fields", () => {
-  const findings = normalizeFindingsStrict([
-    buildFinding({
+test("normalizeNewFindingsStrict accepts optional fields", () => {
+  const findings = normalizeNewFindingsStrict([
+    buildNewFinding({
       file: "a.js",
       line: 42,
     }),
-    buildFinding({
-      blocking: false,
+    buildNewFinding({
       file: "   ",
       line: 0,
+      reopen_finding_id: "sec-2",
     }),
   ]);
 
   assert.equal(findings.length, 2);
   assert.equal(findings[0].file, "a.js");
   assert.equal(findings[0].line, 42);
+  assert.equal(findings[0].reopen_finding_id, null);
   assert.equal(findings[1].file, null);
   assert.equal(findings[1].line, null);
+  assert.equal(findings[1].reopen_finding_id, "SEC-2");
 });
 
-test("normalizeFindingsStrict throws on malformed finding object", () => {
+test("normalizeNewFindingsStrict throws on malformed new finding object", () => {
   assert.throws(
-    () => normalizeFindingsStrict([null]),
-    /finding at index 0 is not an object/,
+    () => normalizeNewFindingsStrict([null]),
+    /new finding at index 0 is not an object/,
   );
 });
 
-test("normalizeFindingsStrict accepts transcript-style aliases", () => {
-  const findings = normalizeFindingsStrict([
+test("normalizeNewFindingsStrict accepts transcript-style aliases", () => {
+  const findings = normalizeNewFindingsStrict([
     {
       message: "Fallback message title",
       description: "Use this as recommendation when missing recommendation key.",
-      blocking: "true",
       file: "  src/service.ts ",
       line: "17",
     },
     {
       title: "Already has title",
       remediation: "Use remediation field as recommendation.",
-      blocking: false,
       line: 4,
     },
   ]);
@@ -63,22 +63,14 @@ test("normalizeFindingsStrict accepts transcript-style aliases", () => {
   assert.equal(findings.length, 2);
   assert.equal(findings[0].title, "Fallback message title");
   assert.equal(findings[0].recommendation, "Use this as recommendation when missing recommendation key.");
-  assert.equal(findings[0].blocking, true);
   assert.equal(findings[0].file, "src/service.ts");
   assert.equal(findings[0].line, 17);
   assert.equal(findings[1].recommendation, "Use remediation field as recommendation.");
 });
 
-test("normalizeFindingsStrict does not include id field", () => {
-  const findings = normalizeFindingsStrict([
-    buildFinding({
-      blocking: false,
-    }),
-  ]);
-
-  assert.equal(findings.length, 1);
-  assert.equal(Object.hasOwn(findings[0], "id"), false);
-  assert.equal(findings[0].blocking, false);
+test("normalizeResolvedFindingIdsStrict normalizes and deduplicates ids", () => {
+  const ids = normalizeResolvedFindingIdsStrict(["sec-1", " SEC-1 ", "TQ-2"]);
+  assert.deepEqual(ids, ["SEC-1", "TQ-2"]);
 });
 
 test("normalizeFindingLenient degrades malformed finding payload", () => {
@@ -89,7 +81,7 @@ test("normalizeFindingLenient degrades malformed finding payload", () => {
     file: null,
     line: null,
     recommendation: "Review this finding manually.",
-    blocking: false,
+    reopen_finding_id: null,
   });
 });
 
@@ -98,19 +90,18 @@ test("normalizeFindingLenient fills defaults and coerces invalid fields", () => 
     {
       title: "",
       recommendation: "",
-      blocking: "true",
       file: "b.js",
       line: -9,
+      reopen_finding_id: " sec-3 ",
     },
     2,
   );
 
-  assert.equal(Object.hasOwn(finding, "id"), false);
   assert.equal(finding.title, "Untitled finding");
   assert.equal(finding.recommendation, "No recommendation provided.");
-  assert.equal(finding.blocking, true);
   assert.equal(finding.file, "b.js");
   assert.equal(finding.line, null);
+  assert.equal(finding.reopen_finding_id, "SEC-3");
 });
 
 test("normalizeStructuredReviewerPayload is strict and trims summary", () => {
@@ -118,7 +109,8 @@ test("normalizeStructuredReviewerPayload is strict and trims summary", () => {
     {
       reviewer: "test-quality",
       summary: "  Looks good.  ",
-      findings: [buildFinding({ blocking: false })],
+      resolved_finding_ids: ["sec-1"],
+      new_findings: [buildNewFinding({ file: "a.js", line: 1 })],
       errors: [123, "kept"],
     },
     "test_quality",
@@ -127,8 +119,9 @@ test("normalizeStructuredReviewerPayload is strict and trims summary", () => {
   assert.equal(payload.reviewer, "test_quality");
   assert.equal(payload.run_state, "completed");
   assert.equal(payload.summary, "Looks good.");
+  assert.deepEqual(payload.resolved_finding_ids, ["SEC-1"]);
+  assert.equal(payload.new_findings.length, 1);
   assert.deepEqual(payload.errors, ["kept"]);
-  assert.equal(Object.hasOwn(payload.findings[0], "id"), false);
 });
 
 test("normalizeStructuredReviewerPayload throws when required fields are missing", () => {
@@ -137,7 +130,8 @@ test("normalizeStructuredReviewerPayload throws when required fields are missing
       normalizeStructuredReviewerPayload(
         {
           reviewer: "security",
-          findings: [],
+          new_findings: [],
+          resolved_finding_ids: [],
         },
         "security",
       ),
@@ -151,7 +145,8 @@ test("normalizePersistedReviewerReport returns missing-input error payload", () 
   assert.equal(payload.reviewer, "security");
   assert.equal(payload.run_state, "error");
   assert.equal(payload.summary, "Reviewer output unavailable or invalid");
-  assert.deepEqual(payload.findings, []);
+  assert.deepEqual(payload.new_findings, []);
+  assert.deepEqual(payload.resolved_finding_ids, []);
   assert.deepEqual(payload.errors, ["missing reviewer report input"]);
 });
 
@@ -170,12 +165,11 @@ test("normalizePersistedReviewerReport leniently normalizes malformed payload", 
       reviewer: "test-quality",
       run_state: "not-a-state",
       summary: "",
-      findings: [
+      resolved_finding_ids: ["sec-1", "", 77],
+      new_findings: [
         {
-          id: "",
           title: "",
           recommendation: "",
-          blocking: "true",
           file: "review.js",
           line: "15",
         },
@@ -188,12 +182,10 @@ test("normalizePersistedReviewerReport leniently normalizes malformed payload", 
   assert.equal(payload.reviewer, "test_quality");
   assert.equal(payload.run_state, "error");
   assert.equal(payload.summary, "Reviewer output unavailable or invalid");
-  assert.equal(payload.findings.length, 2);
-  assert.equal(Object.hasOwn(payload.findings[0], "id"), false);
-  assert.equal(payload.findings[0].blocking, true);
-  assert.equal(payload.findings[0].file, "review.js");
-  assert.equal(payload.findings[0].line, 15);
-  assert.equal(Object.hasOwn(payload.findings[1], "id"), false);
+  assert.equal(payload.new_findings.length, 2);
+  assert.equal(payload.new_findings[0].file, "review.js");
+  assert.equal(payload.new_findings[0].line, 15);
+  assert.deepEqual(payload.resolved_finding_ids, ["SEC-1"]);
   assert.deepEqual(payload.errors, ["keep me"]);
 });
 
@@ -204,7 +196,8 @@ test("normalizePersistedReviewerReport applies skipped summary fallback", () => 
       reviewer: "infrastructure",
       run_state: "skipped",
       summary: "  ",
-      findings: [],
+      resolved_finding_ids: [],
+      new_findings: [],
       errors: [],
     }),
   );

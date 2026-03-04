@@ -2,9 +2,6 @@
 
 import { githubRequest } from "./github-client.mjs";
 import { formatFindingBody } from "./finding-format.mjs";
-import {
-  buildInlineFindingMarker,
-} from "./finding-comment-marker.mjs";
 
 function parseRepository(repo) {
   const [owner, name] = String(repo || "").split("/");
@@ -30,22 +27,12 @@ export function isLineBoundFinding(finding) {
   return file.length > 0 && line > 0;
 }
 
-export function buildInlineCommentBody({ reviewerLabel, finding, signatureSecret }) {
-  const baseBody = formatFindingBody({ reviewerLabel, finding });
-  const marker = buildInlineFindingMarker({
-    body: baseBody,
-    secret: signatureSecret,
-  });
-  if (!marker) {
-    return baseBody;
-  }
-
-  return `${baseBody}\n\n${marker}`;
+export function buildInlineCommentBody({ reviewerLabel, finding }) {
+  return formatFindingBody({ reviewerLabel, finding });
 }
 
 export async function publishInlineFindingComments({
   token,
-  signatureSecret,
   repo,
   prNumber,
   headSha,
@@ -54,7 +41,6 @@ export async function publishInlineFindingComments({
   request = githubRequest,
 }) {
   const normalizedToken = normalizeText(token);
-  const normalizedSignatureSecret = normalizeText(signatureSecret || normalizedToken);
   const normalizedRepo = normalizeText(repo);
   const normalizedPrNumber = normalizeText(prNumber);
   const normalizedHeadSha = normalizeText(headSha);
@@ -69,6 +55,7 @@ export async function publishInlineFindingComments({
       attemptedCount: 0,
       postedCount: 0,
       failedCount: 0,
+      postedEntries: [],
       failedEntries: [],
     };
   }
@@ -80,7 +67,7 @@ export async function publishInlineFindingComments({
 
   const apiBase = `https://api.github.com/repos/${parsedRepo.owner}/${parsedRepo.name}`;
   const lineBoundEntries = normalizedEntries.filter((entry) => isLineBoundFinding(entry?.finding));
-  let postedCount = 0;
+  const postedEntries = [];
   const failedEntries = [];
 
   for (const entry of lineBoundEntries) {
@@ -90,14 +77,13 @@ export async function publishInlineFindingComments({
     const body = buildInlineCommentBody({
       reviewerLabel,
       finding,
-      signatureSecret: normalizedSignatureSecret,
     });
 
     const path = normalizeText(finding.file);
     const line = normalizeFindingLine(finding.line);
 
     try {
-      await request({
+      const created = await request({
         method: "POST",
         url: `${apiBase}/pulls/${normalizedPrNumber}/comments`,
         token: normalizedToken,
@@ -109,7 +95,12 @@ export async function publishInlineFindingComments({
           side: "RIGHT",
         },
       });
-      postedCount += 1;
+
+      postedEntries.push({
+        ...entry,
+        comment_id: Number.isInteger(created?.id) && created.id > 0 ? created.id : null,
+        comment_url: normalizeText(created?.html_url || ""),
+      });
     } catch (error) {
       failedEntries.push({
         ...entry,
@@ -120,8 +111,9 @@ export async function publishInlineFindingComments({
 
   return {
     attemptedCount: lineBoundEntries.length,
-    postedCount,
+    postedCount: postedEntries.length,
     failedCount: failedEntries.length,
+    postedEntries,
     failedEntries,
   };
 }

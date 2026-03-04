@@ -5,15 +5,91 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { computeConsensus } from "./shared/consensus-core.mjs";
 import {
-  collectFindingsForReviewers,
   normalizeReviewers,
   renderConsensusComment,
 } from "./shared/consensus-renderer.mjs";
 import {
   publishInlineFindingComments,
+  isLineBoundFinding,
 } from "./shared/inline-review-comments.mjs";
 import { writeConsensusOutputs } from "./shared/consensus-output.mjs";
 import { normalizePersistedReviewerReport } from "./shared/reviewer-core.mjs";
+import {
+  applyInlineCommentMetadata,
+  mergeLedgerWithReports,
+  normalizeLedger,
+} from "./shared/findings-ledger.mjs";
+import {
+  githubGraphqlRequest,
+  githubRequestAllPages,
+} from "./shared/github-client.mjs";
+
+const REVIEW_THREAD_IDS_QUERY = `
+  query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100, after: $cursor) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            comments(first: 100) {
+              nodes {
+                databaseId
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation ResolveReviewThread($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
+
+const UNRESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation UnresolveReviewThread($threadId: ID!) {
+    unresolveReviewThread(input: { threadId: $threadId }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
+
+function normalizeText(value) {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+function parseRepository(repo) {
+  const [owner, name] = String(repo || "").split("/");
+  if (!owner || !name) {
+    throw new Error("GITHUB_REPOSITORY must be owner/name");
+  }
+  return { owner, name };
+}
+
+function parsePullNumber(value) {
+  const parsed = Number.parseInt(String(value || "").trim(), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("PR_NUMBER must be a positive integer");
+  }
+  return parsed;
+}
 
 function readReportInput(reportsDir, reviewerId) {
   const reportPath = path.join(reportsDir, `${reviewerId}.json`);
@@ -23,82 +99,49 @@ function readReportInput(reportsDir, reviewerId) {
   return fs.readFileSync(reportPath, "utf8");
 }
 
-function normalizeText(value) {
-  return String(value ?? "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\s+/g, " ")
-    .trim();
+function ensureParentDir(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function normalizeFindingLine(value) {
-  return Number.isInteger(value) && value > 0 ? value : 0;
-}
-
-function parseFindingBody(body) {
-  const normalizedBody = String(body ?? "")
-    .replace(/\r\n/g, "\n")
-    .trim();
-  if (!normalizedBody) return null;
-
-  const lines = normalizedBody.split("\n");
-  const headline = String(lines[0] || "").trim();
-  const headlineMatch = headline.match(/^\*\*(.+?)\s+\((blocking|non-blocking)\):\*\*\s*(.+)$/i);
-  if (!headlineMatch) return null;
-
-  const reviewerLabel = normalizeText(headlineMatch[1]);
-  const findingKind = String(headlineMatch[2] || "").toLowerCase();
-  const title = normalizeText(headlineMatch[3]);
-  const recommendation = normalizeText(lines.slice(1).join("\n"));
-
-  return {
-    reviewerLabel,
-    blocking: findingKind === "blocking",
-    title: title || "Untitled finding",
-    recommendation: recommendation || "No recommendation provided.",
-  };
-}
-
-function readPriorFindingsInput(priorFindingsJsonPath) {
-  const normalizedPath = String(priorFindingsJsonPath || "").trim();
+function readLedgerInput(priorLedgerJsonPath) {
+  const normalizedPath = normalizeText(priorLedgerJsonPath);
   if (!normalizedPath || !fs.existsSync(normalizedPath)) {
-    return [];
+    return normalizeLedger(null);
   }
 
-  const raw = fs.readFileSync(normalizedPath, "utf8");
-  let parsed;
   try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Invalid PRIOR_FINDINGS_JSON payload: ${error.message}`);
+    const parsed = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
+    return normalizeLedger(parsed);
+  } catch {
+    return normalizeLedger(null);
   }
-  return Array.isArray(parsed) ? parsed : [];
 }
 
-export function collectUnresolvedBlockingPriorEntries(priorFindings) {
-  const entries = [];
-  const normalizedPriorFindings = Array.isArray(priorFindings) ? priorFindings : [];
-
-  for (const prior of normalizedPriorFindings) {
-    if (!prior || typeof prior !== "object") continue;
-    if (prior.resolved !== false) continue;
-
-    const parsedBody = parseFindingBody(prior.body);
-    if (!parsedBody || parsedBody.blocking !== true) continue;
-
-    entries.push({
-      reviewer: parsedBody.reviewerLabel || "Prior Finding",
-      required: true,
-      finding: {
-        title: parsedBody.title,
-        recommendation: parsedBody.recommendation,
-        file: normalizeText(prior.path),
-        line: normalizeFindingLine(prior.line),
-        blocking: true,
-      },
-    });
+function renderFailureReasons({ reviewerErrors, openEntries }) {
+  const reasons = Array.isArray(reviewerErrors) ? [...reviewerErrors] : [];
+  for (const entry of Array.isArray(openEntries) ? openEntries : []) {
+    const finding = entry?.finding || {};
+    const id = normalizeText(finding.id);
+    const title = normalizeText(finding.title) || "Untitled finding";
+    reasons.push(`open-finding: ${id ? `[${id}] ` : ""}${title}`);
   }
+  return reasons;
+}
 
-  return entries;
+function toPresentationEntries(ledgerFindings, status) {
+  return ledgerFindings
+    .filter((entry) => entry.status === status)
+    .map((entry) => ({
+      reviewer: entry.reviewer,
+      status: entry.status,
+      finding: {
+        id: entry.id,
+        title: entry.title,
+        recommendation: entry.recommendation,
+        file: entry.file,
+        line: entry.line,
+      },
+    }));
 }
 
 export function readReportsForReviewers({ reportsDir, reviewers }) {
@@ -112,22 +155,197 @@ export function readReportsForReviewers({ reportsDir, reviewers }) {
   return reports;
 }
 
+async function fetchReviewThreadIdsByCommentId({
+  token,
+  owner,
+  name,
+  pullNumber,
+}) {
+  const map = new Map();
+  let cursor = null;
+
+  while (true) {
+    const data = await githubGraphqlRequest({
+      token,
+      query: REVIEW_THREAD_IDS_QUERY,
+      variables: {
+        owner,
+        name,
+        number: pullNumber,
+        cursor,
+      },
+    });
+
+    const connection = data?.repository?.pullRequest?.reviewThreads;
+    if (!connection) break;
+
+    for (const thread of connection.nodes || []) {
+      const threadId = normalizeText(thread?.id);
+      if (!threadId) continue;
+
+      for (const comment of thread?.comments?.nodes || []) {
+        const commentId = Number(comment?.databaseId);
+        if (Number.isInteger(commentId) && commentId > 0) {
+          map.set(commentId, threadId);
+        }
+      }
+    }
+
+    if (!connection.pageInfo?.hasNextPage) break;
+    cursor = connection.pageInfo.endCursor || null;
+  }
+
+  return map;
+}
+
+async function setReviewThreadResolved({ token, threadId, resolved }) {
+  const normalizedThreadId = normalizeText(threadId);
+  if (!normalizedThreadId) {
+    return false;
+  }
+
+  await githubGraphqlRequest({
+    token,
+    query: resolved ? RESOLVE_REVIEW_THREAD_MUTATION : UNRESOLVE_REVIEW_THREAD_MUTATION,
+    variables: { threadId: normalizedThreadId },
+  });
+
+  return true;
+}
+
+function isNonBotUser(review) {
+  const login = String(review?.user?.login || "").trim();
+  const type = String(review?.user?.type || "").trim().toLowerCase();
+  if (!login) return false;
+  if (type === "bot") return false;
+  if (login.toLowerCase().endsWith("[bot]")) return false;
+  return true;
+}
+
+function pickLatestReviewsByUser(reviews) {
+  const latestByUser = new Map();
+
+  for (const review of Array.isArray(reviews) ? reviews : []) {
+    if (!isNonBotUser(review)) continue;
+    const login = String(review.user.login).trim().toLowerCase();
+
+    const existing = latestByUser.get(login);
+    if (!existing) {
+      latestByUser.set(login, review);
+      continue;
+    }
+
+    const existingDate = Date.parse(existing.submitted_at || "");
+    const currentDate = Date.parse(review.submitted_at || "");
+
+    if (!Number.isNaN(currentDate) && Number.isNaN(existingDate)) {
+      latestByUser.set(login, review);
+      continue;
+    }
+
+    if (!Number.isNaN(currentDate) && !Number.isNaN(existingDate) && currentDate >= existingDate) {
+      latestByUser.set(login, review);
+      continue;
+    }
+
+    if (Number(review.id) > Number(existing.id)) {
+      latestByUser.set(login, review);
+    }
+  }
+
+  return latestByUser;
+}
+
+async function fetchHumanBypassApproval({ token, repo, prNumber, headSha }) {
+  const normalizedToken = normalizeText(token);
+  const normalizedHeadSha = normalizeText(headSha);
+  if (!normalizedToken || !normalizedHeadSha) {
+    return {
+      approved: false,
+      approvers: [],
+    };
+  }
+
+  const { owner, name } = parseRepository(repo);
+  const pullNumber = parsePullNumber(prNumber);
+
+  const reviews = await githubRequestAllPages({
+    token: normalizedToken,
+    url: `https://api.github.com/repos/${owner}/${name}/pulls/${pullNumber}/reviews?per_page=100&page=1`,
+  });
+
+  const latestByUser = pickLatestReviewsByUser(reviews);
+  const approvers = [];
+
+  for (const review of latestByUser.values()) {
+    const state = String(review?.state || "").trim().toUpperCase();
+    const commitId = normalizeText(review?.commit_id);
+    if (state !== "APPROVED") continue;
+    if (!commitId || commitId !== normalizedHeadSha) continue;
+    approvers.push(String(review?.user?.login || "").trim());
+  }
+
+  return {
+    approved: approvers.length > 0,
+    approvers,
+  };
+}
+
+function evaluateOutcome({ humanBypassApproved, reviewerErrorsCount, openFindingsCount }) {
+  if (humanBypassApproved) {
+    return {
+      outcome: "PASS",
+      outcomeReason: "PASS_HUMAN_BYPASS",
+    };
+  }
+
+  if (reviewerErrorsCount > 0) {
+    return {
+      outcome: "FAIL",
+      outcomeReason: "FAIL_REVIEWER_ERRORS",
+    };
+  }
+
+  if (openFindingsCount > 0) {
+    return {
+      outcome: "FAIL",
+      outcomeReason: "FAIL_OPEN_FINDINGS",
+    };
+  }
+
+  return {
+    outcome: "PASS",
+    outcomeReason: "PASS_NO_FINDINGS",
+  };
+}
+
 export async function runConsensus({
+  runId,
   sha,
   commentPath,
+  ledgerPath,
   token,
-  signatureSecret,
   repo,
   prNumber,
   marker,
   reportsDir,
   reviewersJson,
   publishInlineComments,
-  priorFindingsJson,
+  priorLedgerJson,
 }) {
   const normalizedReportsDir = String(reportsDir || "").trim();
   if (!normalizedReportsDir) {
     throw new Error("REPORTS_DIR is required");
+  }
+
+  const normalizedCommentPath = String(commentPath || "").trim();
+  if (!normalizedCommentPath) {
+    throw new Error("COMMENT_PATH is required");
+  }
+
+  const normalizedLedgerPath = String(ledgerPath || "").trim();
+  if (!normalizedLedgerPath) {
+    throw new Error("LEDGER_PATH is required");
   }
 
   const reviewers = normalizeReviewers(reviewersJson || "[]");
@@ -135,80 +353,165 @@ export async function runConsensus({
 
   const reports = readReportsForReviewers({ reportsDir: normalizedReportsDir, reviewers });
 
-  let {
+  const {
     reviewerErrors,
-    failureReasons,
   } = computeConsensus(reports, { reviewers });
 
-  const {
-    blockingEntries: reportBlockingEntries,
-  } = collectFindingsForReviewers({ reports, reviewers });
-  const priorFindings = readPriorFindingsInput(priorFindingsJson);
-  const carryoverBlockingEntries = collectUnresolvedBlockingPriorEntries(priorFindings);
-  const blockingEntriesAll = [...reportBlockingEntries, ...carryoverBlockingEntries];
+  const priorLedger = readLedgerInput(priorLedgerJson);
+  const merged = mergeLedgerWithReports({
+    priorLedger,
+    reports,
+    reviewers,
+    runId: normalizeText(runId) || "manual",
+    timestamp: new Date().toISOString(),
+  });
 
-  failureReasons = [
-    ...failureReasons,
-    ...carryoverBlockingEntries.map(({ finding }) => {
-      return `prior-inline: unresolved blocking finding (${finding.title})`;
-    }),
-  ];
-  const outcome = failureReasons.length > 0 ? "FAIL" : "PASS";
+  let ledger = merged.ledger;
 
   const shouldPublishInlineComments = String(publishInlineComments ?? "true").toLowerCase() !== "false";
-  if (shouldPublishInlineComments && token && repo && prNumber && sha) {
-    await publishInlineFindingComments({
+  const canUseGithub = normalizeText(token) && normalizeText(repo) && normalizeText(prNumber) && normalizeText(sha);
+
+  if (shouldPublishInlineComments && canUseGithub) {
+    const newlyLineBound = merged.newlyOpenedEntries.filter((entry) => isLineBoundFinding(entry?.finding));
+
+    if (newlyLineBound.length > 0) {
+      const posted = await publishInlineFindingComments({
+        token,
+        repo,
+        prNumber,
+        headSha: sha,
+        entries: newlyLineBound,
+        labelsByReviewerId,
+      });
+
+      if (posted.postedEntries.length > 0) {
+        const { owner, name } = parseRepository(repo);
+        const pullNumber = parsePullNumber(prNumber);
+        const threadIdsByCommentId = await fetchReviewThreadIdsByCommentId({
+          token,
+          owner,
+          name,
+          pullNumber,
+        });
+
+        const entriesWithThreadIds = posted.postedEntries.map((entry) => ({
+          ...entry,
+          inline_thread_id:
+            Number.isInteger(entry.comment_id) && threadIdsByCommentId.has(entry.comment_id)
+              ? threadIdsByCommentId.get(entry.comment_id)
+              : "",
+        }));
+
+        ledger = applyInlineCommentMetadata({
+          ledger,
+          entries: entriesWithThreadIds,
+        });
+      }
+    }
+
+    // Keep comment thread lifecycle in sync with finding lifecycle transitions.
+    const findingById = new Map(ledger.findings.map((finding) => [finding.id, finding]));
+
+    for (const entry of merged.newlyResolvedEntries) {
+      const findingId = normalizeText(entry?.finding?.id).toUpperCase();
+      const finding = findingById.get(findingId);
+      const threadId = normalizeText(finding?.inline_thread_id);
+      if (!threadId) continue;
+      await setReviewThreadResolved({ token, threadId, resolved: true });
+    }
+
+    for (const entry of merged.reopenedEntries) {
+      const findingId = normalizeText(entry?.finding?.id).toUpperCase();
+      const finding = findingById.get(findingId);
+      const threadId = normalizeText(finding?.inline_thread_id);
+      if (!threadId) continue;
+      await setReviewThreadResolved({ token, threadId, resolved: false });
+    }
+  }
+
+  const openEntries = toPresentationEntries(ledger.findings, "open");
+  const resolvedEntries = toPresentationEntries(ledger.findings, "resolved");
+
+  let humanBypass = {
+    approved: false,
+    approvers: [],
+  };
+
+  if (canUseGithub) {
+    humanBypass = await fetchHumanBypassApproval({
       token,
-      signatureSecret,
       repo,
       prNumber,
       headSha: sha,
-      entries: reportBlockingEntries,
-      labelsByReviewerId,
     });
   }
+
+  const { outcome, outcomeReason } = evaluateOutcome({
+    humanBypassApproved: humanBypass.approved,
+    reviewerErrorsCount: reviewerErrors.length,
+    openFindingsCount: openEntries.length,
+  });
+
+  const failureReasons = renderFailureReasons({
+    reviewerErrors,
+    openEntries,
+  });
 
   const commentBody = renderConsensusComment({
     marker,
     outcome,
-    blockingEntries: blockingEntriesAll,
+    outcomeReason,
+    openEntries,
+    resolvedEntries,
     reviewerErrors,
     labelsByReviewerId,
+    humanBypass,
   });
-  fs.writeFileSync(commentPath, commentBody, "utf8");
+
+  ensureParentDir(normalizedCommentPath);
+  ensureParentDir(normalizedLedgerPath);
+  fs.writeFileSync(normalizedCommentPath, commentBody, "utf8");
+  fs.writeFileSync(normalizedLedgerPath, `${JSON.stringify(ledger, null, 2)}\n`, "utf8");
 
   writeConsensusOutputs({
     outcome,
-    commentPath,
-    requiredBlockingFindingsCount: blockingEntriesAll.length,
+    outcomeReason,
+    commentPath: normalizedCommentPath,
+    ledgerPath: normalizedLedgerPath,
+    openFindingsCount: openEntries.length,
     reviewerErrorsCount: reviewerErrors.length,
     reports,
     failureReasons,
+    humanBypassApproved: humanBypass.approved,
   });
 
   return {
     outcome,
-    commentPath,
-    requiredBlockingFindingsCount: blockingEntriesAll.length,
+    outcomeReason,
+    commentPath: normalizedCommentPath,
+    ledgerPath: normalizedLedgerPath,
+    openFindingsCount: openEntries.length,
     reviewerErrorsCount: reviewerErrors.length,
     reports,
     failureReasons,
+    humanBypass,
   };
 }
 
 async function main() {
   await runConsensus({
+    runId: process.env.GITHUB_RUN_ID || "",
     sha: process.env.SHA || "",
     commentPath: process.env.COMMENT_PATH || "lgtm-comment.md",
+    ledgerPath: process.env.LEDGER_PATH || "lgtm-findings-ledger.json",
     token: process.env.GITHUB_TOKEN || "",
-    signatureSecret: process.env.FINDING_SIGNATURE_SECRET || process.env.GITHUB_TOKEN || "",
     repo: process.env.GITHUB_REPOSITORY || "",
     prNumber: process.env.PR_NUMBER || "",
     marker: process.env.MARKER || "<!-- codex-lgtm -->",
     reportsDir: process.env.REPORTS_DIR,
     reviewersJson: process.env.REVIEWERS_JSON || "[]",
     publishInlineComments: process.env.PUBLISH_INLINE_COMMENTS ?? "true",
-    priorFindingsJson: process.env.PRIOR_FINDINGS_JSON || "",
+    priorLedgerJson: process.env.PRIOR_LEDGER_JSON || "",
   });
 }
 

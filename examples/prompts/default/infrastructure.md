@@ -23,11 +23,6 @@ Do not restate lint/style issues unless they directly translate to deployment or
 For each finding, include file and line when available.
 Explain concrete operational impact and blast radius.
 
-## Blocking Decision
-
-Set `blocking=true` only when merge should be blocked due to deployment/operational risk (or explicitly overridden by a human reviewer).
-Set `blocking=false` for advisory findings that do not require blocking merge.
-
 ## Output Contract
 
 Return JSON only with this exact shape:
@@ -35,13 +30,14 @@ Return JSON only with this exact shape:
 - `reviewer` must be `infrastructure`
 - `run_state` must be `completed`
 - include concise `summary`
-- include `findings` array (can be empty)
-- each finding must include:
+- include `resolved_finding_ids` array (can be empty)
+- include `new_findings` array (can be empty)
+- each `new_findings` item must include:
   - `title` (short)
   - `file` (string path, or `null` when unknown)
   - `line` (positive integer, or `null` when unknown)
   - `recommendation` (concrete remediation)
-  - `blocking` (`true` or `false`)
+  - optional `reopen_finding_id` (existing finding ID to reopen)
 - include `errors` array always (use `[]` when none)
 - include every key above exactly; do not omit keys
 

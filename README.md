@@ -6,9 +6,9 @@ Reusable GitHub Actions workflow for blocker-first pull request review with mult
 
 - Multiple specialized reviewers running in parallel.
 - Trusted config and prompts loaded from the PR base revision.
-- PASS/FAIL gate based on required reviewer blockers and required reviewer execution errors.
-- Sticky PR summary comment and optional inline blocking findings.
-- Prior inline finding memory fed back to reviewers to reduce repeat comments.
+- Findings ledger lifecycle (`open`/`resolved`) persisted as a run artifact.
+- Sticky PR summary comment with open/resolved sections and optional inline findings.
+- PASS/FAIL gate based on reviewer errors + open findings, with optional human approval bypass.
 
 ## Quick Start
 
@@ -25,12 +25,10 @@ reviewers:
     display_name: Security
     prompt_file: .github/lgtm/prompts/security.md
     scope: security risk
-    required: true
   - id: code_quality
     display_name: Code Quality
     prompt_file: .github/lgtm/prompts/code-quality.md
     scope: maintainability and correctness
-    required: false
     paths:
       - src/**
 ```
@@ -39,7 +37,9 @@ reviewers:
 
 Starter prompts are available in `examples/prompts/default/`.
 
-4. Add `.github/workflows/pr-checks.yml`:
+4. Merge the config and prompt files to your default branch first.
+
+5. In a follow-up PR, add `.github/workflows/pr-checks.yml`:
 
 ```yaml
 name: PR Checks
@@ -47,6 +47,8 @@ name: PR Checks
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 permissions:
   contents: read
@@ -65,7 +67,9 @@ jobs:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-5. Open or update a PR.
+6. Open or update a PR.
+
+If you add the caller workflow and `.github/lgtm.yml` in the same PR, the first run will fail because trusted config and prompts are loaded from the PR base revision.
 
 ## Configuration Schema
 
@@ -84,7 +88,6 @@ Reviewer fields:
 - `display_name` (required)
 - `prompt_file` (required, relative path, no parent traversal)
 - `scope` (required)
-- `required` (optional, defaults to `true`)
 - `paths` (optional array of glob patterns)
 
 ## Workflow Inputs
@@ -111,7 +114,7 @@ Required secret:
 - Reviewer scope is limited to files changed in `base...head`.
 - Reviewer execution runs in read-only sandbox mode.
 - Workflow execution is non-interactive (`approval_policy: never`).
-- Prior finding memory only trusts bot-authored comments with valid signature markers.
+- Prior finding state is loaded from the latest completed LGTM artifact for the PR.
 
 ## Fork PR Behavior
 

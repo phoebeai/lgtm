@@ -35,12 +35,25 @@ export function asBool(value) {
   return String(value || "").toLowerCase() === "true";
 }
 
-export function makeBasePayload({ reviewer, runState, summary, findings = [], errors }) {
+export function normalizeFindingId(value) {
+  if (!isNonEmptyString(value)) return "";
+  return value.trim().toUpperCase();
+}
+
+export function makeBasePayload({
+  reviewer,
+  runState,
+  summary,
+  resolvedFindingIds = [],
+  newFindings = [],
+  errors,
+}) {
   return {
     reviewer,
     run_state: runState,
     summary,
-    findings,
+    resolved_finding_ids: resolvedFindingIds,
+    new_findings: newFindings,
     errors: errors || [],
   };
 }
@@ -50,7 +63,8 @@ export function makeErrorPayload(reviewer, reasons) {
     reviewer,
     runState: "error",
     summary: "Reviewer output unavailable or invalid",
-    findings: [],
+    resolvedFindingIds: [],
+    newFindings: [],
     errors: reasons || [],
   });
 }
@@ -69,20 +83,6 @@ function firstNonEmptyStringByKeys(value, keys) {
   return "";
 }
 
-function normalizeBlockingStrict(value, index) {
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true") return true;
-    if (normalized === "false") return false;
-  }
-
-  throw new Error(`finding ${index} missing blocking boolean`);
-}
-
 function normalizeLine(value) {
   if (Number.isInteger(value) && value > 0) {
     return value;
@@ -98,37 +98,38 @@ function normalizeLine(value) {
   return null;
 }
 
-function normalizeBlockingLenient(value) {
-  if (value === true) return true;
-  if (value === false) return false;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true") return true;
-    if (normalized === "false") return false;
+function normalizeReopenFindingId(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
   }
-  return false;
+
+  const normalized = normalizeFindingId(value);
+  if (!normalized) {
+    throw new Error("reopen_finding_id must be a non-empty string when provided");
+  }
+
+  return normalized;
 }
 
-export function normalizeFindingsStrict(rawFindings) {
+export function normalizeNewFindingsStrict(rawFindings) {
   if (!Array.isArray(rawFindings)) {
-    throw new Error("findings must be an array");
+    throw new Error("new_findings must be an array");
   }
 
   return rawFindings.map((finding, index) => {
     if (!finding || typeof finding !== "object" || Array.isArray(finding)) {
-      throw new Error(`finding at index ${index} is not an object`);
+      throw new Error(`new finding at index ${index} is not an object`);
     }
 
     const title = firstNonEmptyStringByKeys(finding, FINDING_TITLE_KEYS);
     const recommendation = firstNonEmptyStringByKeys(finding, FINDING_RECOMMENDATION_KEYS);
-    const blocking = normalizeBlockingStrict(finding.blocking, index);
 
     if (!title) {
-      throw new Error(`finding ${index} missing title`);
+      throw new Error(`new finding ${index} missing title`);
     }
 
     if (!recommendation) {
-      throw new Error(`finding ${index} missing recommendation`);
+      throw new Error(`new finding ${index} missing recommendation`);
     }
 
     return {
@@ -136,19 +137,19 @@ export function normalizeFindingsStrict(rawFindings) {
       file: isNonEmptyString(finding.file) ? finding.file.trim() : null,
       line: normalizeLine(finding.line),
       recommendation,
-      blocking,
+      reopen_finding_id: normalizeReopenFindingId(finding.reopen_finding_id),
     };
   });
 }
 
-export function normalizeFindingLenient(finding, index) {
+export function normalizeFindingLenient(finding) {
   if (!finding || typeof finding !== "object" || Array.isArray(finding)) {
     return {
       title: "Unparseable finding payload",
       file: null,
       line: null,
       recommendation: "Review this finding manually.",
-      blocking: false,
+      reopen_finding_id: null,
     };
   }
 
@@ -158,12 +159,29 @@ export function normalizeFindingLenient(finding, index) {
     line: normalizeLine(finding.line),
     recommendation:
       firstNonEmptyStringByKeys(finding, FINDING_RECOMMENDATION_KEYS) || "No recommendation provided.",
-    blocking: normalizeBlockingLenient(finding.blocking),
+    reopen_finding_id: normalizeFindingId(finding.reopen_finding_id) || null,
   };
 }
 
 function normalizeErrors(rawErrors) {
   return Array.isArray(rawErrors) ? rawErrors.filter((item) => typeof item === "string") : [];
+}
+
+export function normalizeResolvedFindingIdsStrict(rawIds) {
+  if (!Array.isArray(rawIds)) {
+    throw new Error("resolved_finding_ids must be an array");
+  }
+
+  const ids = [];
+  for (let index = 0; index < rawIds.length; index += 1) {
+    const normalized = normalizeFindingId(rawIds[index]);
+    if (!normalized) {
+      throw new Error(`resolved_finding_ids[${index}] must be a non-empty string`);
+    }
+    ids.push(normalized);
+  }
+
+  return [...new Set(ids)];
 }
 
 export function normalizeStructuredReviewerPayload(rawPayload, expectedReviewer) {
@@ -184,7 +202,8 @@ export function normalizeStructuredReviewerPayload(rawPayload, expectedReviewer)
     reviewer,
     run_state: "completed",
     summary: rawPayload.summary.trim(),
-    findings: normalizeFindingsStrict(rawPayload.findings),
+    resolved_finding_ids: normalizeResolvedFindingIdsStrict(rawPayload.resolved_finding_ids),
+    new_findings: normalizeNewFindingsStrict(rawPayload.new_findings),
     errors: normalizeErrors(rawPayload.errors),
   };
 }
@@ -194,7 +213,8 @@ function makeMissingReportPayload(reviewer) {
     reviewer,
     run_state: "error",
     summary: "Reviewer output unavailable or invalid",
-    findings: [],
+    resolved_finding_ids: [],
+    new_findings: [],
     errors: ["missing reviewer report input"],
   };
 }
@@ -204,7 +224,8 @@ function makeParseFailurePayload(reviewer, reason) {
     reviewer,
     run_state: "error",
     summary: "Reviewer output unavailable or invalid",
-    findings: [],
+    resolved_finding_ids: [],
+    new_findings: [],
     errors: [reason],
   };
 }
@@ -228,8 +249,13 @@ export function normalizePersistedReviewerReport(reviewer, raw) {
   }
 
   const runState = VALID_RUN_STATES.has(parsed.run_state) ? parsed.run_state : "error";
-  const findings = Array.isArray(parsed.findings)
-    ? parsed.findings.map((finding, index) => normalizeFindingLenient(finding, index))
+  const newFindings = Array.isArray(parsed.new_findings)
+    ? parsed.new_findings.map((finding) => normalizeFindingLenient(finding))
+    : [];
+  const resolvedFindingIds = Array.isArray(parsed.resolved_finding_ids)
+    ? parsed.resolved_finding_ids
+        .map((value) => normalizeFindingId(value))
+        .filter(Boolean)
     : [];
 
   let summary = "No summary provided.";
@@ -245,7 +271,8 @@ export function normalizePersistedReviewerReport(reviewer, raw) {
     reviewer: normalizeReviewer(parsed.reviewer, expectedReviewer),
     run_state: runState,
     summary,
-    findings,
+    resolved_finding_ids: [...new Set(resolvedFindingIds)],
+    new_findings: newFindings,
     errors: normalizeErrors(parsed.errors),
   };
 }

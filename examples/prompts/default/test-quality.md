@@ -23,11 +23,6 @@ Do not report lint/format/type-check issues unless they create concrete test-ris
 For each finding, include file and line when possible.
 Tie each finding to a specific regression risk.
 
-## Blocking Decision
-
-Set `blocking=true` only when the test gap is severe enough that merge should be blocked until fixed (or explicitly overridden by a human reviewer).
-Set `blocking=false` for advisory findings that improve quality but should not block merge.
-
 ## Output Contract
 
 Return JSON only with this exact shape:
@@ -35,13 +30,14 @@ Return JSON only with this exact shape:
 - `reviewer` must be `test_quality`
 - `run_state` must be `completed`
 - include concise `summary`
-- include `findings` array (can be empty)
-- each finding must include:
+- include `resolved_finding_ids` array (can be empty)
+- include `new_findings` array (can be empty)
+- each `new_findings` item must include:
   - `title` (short)
   - `file` (string path, or `null` when unknown)
   - `line` (positive integer, or `null` when unknown)
   - `recommendation` (concrete remediation)
-  - `blocking` (`true` or `false`)
+  - optional `reopen_finding_id` (existing finding ID to reopen)
 - include `errors` array always (use `[]` when none)
 - include every key above exactly; do not omit keys
 

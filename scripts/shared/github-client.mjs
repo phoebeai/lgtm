@@ -45,6 +45,27 @@ export async function githubRequest({ method = "GET", url, token, body }) {
   return parseResponsePayload(response);
 }
 
+export async function githubGraphqlRequest({ token, query, variables }) {
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: buildHeaders(token),
+    body: JSON.stringify({ query, variables }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GraphQL request failed (${response.status}): ${text}`);
+  }
+
+  const payload = await response.json();
+  if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+    const firstError = payload.errors[0];
+    throw new Error(`GraphQL request failed: ${firstError?.message || "unknown GraphQL error"}`);
+  }
+
+  return payload?.data || null;
+}
+
 function parseNextLink(linkHeader) {
   if (!linkHeader) return "";
   const match = /<([^>]+)>;\s*rel="next"/.exec(linkHeader);

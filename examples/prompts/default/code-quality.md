@@ -23,11 +23,6 @@ Avoid duplicating lint/format/type-check findings unless they represent broader 
 For each finding, include file and line when possible.
 Provide concrete remediation guidance.
 
-## Blocking Decision
-
-Set `blocking=true` only when the change introduces quality risk severe enough to block merge (or explicitly overridden by a human reviewer).
-Set `blocking=false` for advisory findings that should not block merge.
-
 ## Output Contract
 
 Return JSON only with this exact shape:
@@ -35,13 +30,14 @@ Return JSON only with this exact shape:
 - `reviewer` must be `code_quality`
 - `run_state` must be `completed`
 - include concise `summary`
-- include `findings` array (can be empty)
-- each finding must include:
+- include `resolved_finding_ids` array (can be empty)
+- include `new_findings` array (can be empty)
+- each `new_findings` item must include:
   - `title` (short)
   - `file` (string path, or `null` when unknown)
   - `line` (positive integer, or `null` when unknown)
   - `recommendation` (concrete remediation)
-  - `blocking` (`true` or `false`)
+  - optional `reopen_finding_id` (existing finding ID to reopen)
 - include `errors` array always (use `[]` when none)
 - include every key above exactly; do not omit keys
 

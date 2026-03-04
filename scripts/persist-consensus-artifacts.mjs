@@ -43,9 +43,10 @@ export function persistConsensusArtifacts({
   reviewersJson,
   consensusReports,
   outcome,
-  blockingFindingsCount,
+  openFindingsCount,
   reviewerErrorsCount,
   commentPath,
+  ledgerPath,
 }) {
   const normalizedRunnerTemp = String(runnerTemp || "").trim();
   if (!normalizedRunnerTemp) {
@@ -55,6 +56,10 @@ export function persistConsensusArtifacts({
   const normalizedCommentPath = String(commentPath || "").trim();
   if (!normalizedCommentPath) {
     throw new Error("COMMENT_PATH is required");
+  }
+  const normalizedLedgerPath = String(ledgerPath || "").trim();
+  if (!normalizedLedgerPath) {
+    throw new Error("LEDGER_PATH is required");
   }
 
   const reviewerIds = parseReviewers(reviewersJson);
@@ -70,9 +75,12 @@ export function persistConsensusArtifacts({
 
   writeTextFile(path.join(targetDir, "reports-merged.json"), consensusReports);
   writeTextFile(path.join(targetDir, "outcome.txt"), outcome);
-  writeTextFile(path.join(targetDir, "blocking-findings-count.txt"), blockingFindingsCount);
+  writeTextFile(path.join(targetDir, "open-findings-count.txt"), openFindingsCount);
+  // Backward-compat artifact path retained for external consumers.
+  writeTextFile(path.join(targetDir, "blocking-findings-count.txt"), openFindingsCount);
   writeTextFile(path.join(targetDir, "reviewer-errors-count.txt"), reviewerErrorsCount);
   fs.copyFileSync(normalizedCommentPath, path.join(targetDir, "comment.md"));
+  fs.copyFileSync(normalizedLedgerPath, path.join(targetDir, "findings-ledger.json"));
 }
 
 function main() {
@@ -81,9 +89,10 @@ function main() {
     reviewersJson: process.env.REVIEWERS_JSON,
     consensusReports: process.env.CONSENSUS_REPORTS,
     outcome: process.env.OUTCOME,
-    blockingFindingsCount: process.env.BLOCKING_FINDINGS_COUNT,
+    openFindingsCount: process.env.OPEN_FINDINGS_COUNT || process.env.BLOCKING_FINDINGS_COUNT,
     reviewerErrorsCount: process.env.REVIEWER_ERRORS_COUNT,
     commentPath: process.env.COMMENT_PATH,
+    ledgerPath: process.env.LEDGER_PATH,
   });
 }
 

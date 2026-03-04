@@ -95,7 +95,8 @@ export function processReviewerOutput({
       reviewer: expectedReviewer,
       runState: "skipped",
       summary: "Skipped (no relevant changes)",
-      findings: [],
+      resolvedFindingIds: [],
+      newFindings: [],
       errors: [],
     });
   } else if (normalizedPromptStepOutcome !== "success") {
@@ -118,7 +119,8 @@ export function processReviewerOutput({
       reviewer: expectedReviewer,
       runState: "skipped",
       summary,
-      findings: [],
+      resolvedFindingIds: [],
+      newFindings: [],
       errors: [],
     });
   } else if (!normalizedRawOutput) {

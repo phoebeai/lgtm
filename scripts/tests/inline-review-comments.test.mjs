@@ -8,20 +8,20 @@ import {
 
 function makeEntry({
   reviewer = "security",
+  id = "SEC-1",
   title = "Issue",
   file = "src/app.ts",
   line = 12,
   recommendation = "Fix this",
-  blocking = true,
 } = {}) {
   return {
     reviewer,
     finding: {
+      id,
       title,
       file,
       line,
       recommendation,
-      blocking,
     },
   };
 }
@@ -33,9 +33,23 @@ test("isLineBoundFinding validates file+line shape", () => {
   assert.equal(isLineBoundFinding({ file: "src/app.ts", line: null }), false);
 });
 
+test("buildInlineCommentBody includes reviewer, finding id, and recommendation", () => {
+  const body = buildInlineCommentBody({
+    reviewerLabel: "Security",
+    finding: {
+      id: "SEC-4",
+      title: "SQL injection",
+      recommendation: "Use parameterized queries.",
+    },
+  });
+
+  assert.match(body, /\*\*Security \[SEC-4\]:\*\* SQL injection/);
+  assert.match(body, /Use parameterized queries\./);
+});
+
 test("publishInlineFindingComments posts all line-bound findings", async (t) => {
-  const first = makeEntry({ title: "Existing finding", line: 12 });
-  const second = makeEntry({ title: "New finding", line: 30 });
+  const first = makeEntry({ id: "SEC-1", title: "Existing finding", line: 12 });
+  const second = makeEntry({ id: "SEC-2", title: "New finding", line: 30 });
 
   const calls = [];
   const originalFetch = globalThis.fetch;
@@ -43,12 +57,14 @@ test("publishInlineFindingComments posts all line-bound findings", async (t) => 
     globalThis.fetch = originalFetch;
   });
 
+  let callId = 200;
   globalThis.fetch = async (url, options = {}) => {
     const method = options.method || "GET";
     calls.push({ url: String(url), method, body: options.body });
 
     if (method === "POST" && /\/pulls\/7\/comments$/.test(String(url))) {
-      return new Response(JSON.stringify({ id: 202 }), {
+      callId += 1;
+      return new Response(JSON.stringify({ id: callId, html_url: `https://example.com/c/${callId}` }), {
         status: 201,
         headers: {
           "content-type": "application/json",
@@ -66,12 +82,12 @@ test("publishInlineFindingComments posts all line-bound findings", async (t) => 
     headSha: "abc123",
     entries: [first, second],
     labelsByReviewerId: new Map([["security", "Security"]]),
-    actor: "github-actions[bot]",
   });
 
   assert.equal(result.attemptedCount, 2);
   assert.equal(result.postedCount, 2);
   assert.equal(result.failedCount, 0);
+  assert.equal(result.postedEntries.length, 2);
 
   const postCalls = calls.filter((call) => call.method === "POST");
   assert.equal(postCalls.length, 2);
@@ -81,17 +97,18 @@ test("publishInlineFindingComments posts all line-bound findings", async (t) => 
   assert.equal(firstPayload.path, "src/app.ts");
   assert.equal(firstPayload.line, 12);
   assert.equal(firstPayload.side, "RIGHT");
-  assert.match(firstPayload.body, /\*\*Security \(blocking\):\*\* Existing finding/);
-  assert.match(firstPayload.body, /<!-- codex-inline-finding sig=[a-f0-9]{64} -->/);
+  assert.match(firstPayload.body, /\*\*Security \[SEC-1\]:\*\* Existing finding/);
 
   const secondPayload = JSON.parse(postCalls[1].body);
   assert.equal(secondPayload.commit_id, "abc123");
   assert.equal(secondPayload.path, "src/app.ts");
   assert.equal(secondPayload.line, 30);
   assert.equal(secondPayload.side, "RIGHT");
-  assert.match(secondPayload.body, /\*\*Security \(blocking\):\*\* New finding/);
+  assert.match(secondPayload.body, /\*\*Security \[SEC-2\]:\*\* New finding/);
   assert.match(secondPayload.body, /\n\nFix this/);
-  assert.match(secondPayload.body, /<!-- codex-inline-finding sig=[a-f0-9]{64} -->/);
+
+  assert.equal(result.postedEntries[0].comment_id > 0, true);
+  assert.match(result.postedEntries[0].comment_url, /^https:\/\/example\.com\/c\//);
 });
 
 test("publishInlineFindingComments reports posting failures without throwing", async (t) => {
@@ -119,7 +136,6 @@ test("publishInlineFindingComments reports posting failures without throwing", a
     headSha: "abc123",
     entries: [entry],
     labelsByReviewerId: new Map([["security", "Security"]]),
-    actor: "github-actions[bot]",
   });
 
   assert.equal(result.attemptedCount, 1);

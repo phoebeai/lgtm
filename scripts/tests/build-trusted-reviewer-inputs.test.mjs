@@ -242,7 +242,7 @@ test("buildTrustedReviewerInputs helper enforces valid path filters JSON", () =>
   );
 });
 
-test("buildTrustedReviewerInputs injects prior finding memory for scoped files", (t) => {
+test("buildTrustedReviewerInputs injects prior ledger entries for scoped files", (t) => {
   const repoDir = createRepo(t, "lgtm-trusted-inputs-");
   writeRepoFile(repoDir, ".github/lgtm/prompts/security.md", "BASE PROMPT CONTENT");
   writeRepoFile(repoDir, "src/file.txt", "base");
@@ -264,15 +264,20 @@ test("buildTrustedReviewerInputs injects prior finding memory for scoped files",
     promptRel: ".github/lgtm/prompts/security.md",
     schemaFile: schemaPath,
     outputDir: path.join(repoDir, "tmp-out"),
-    priorFindingEntries: [
-      {
-        path: "src/file.txt",
-        line: 1,
-        resolved: true,
-        body: "**Security (blocking):** Existing issue",
-        url: "https://example.com/comment/1",
-      },
-    ],
+    priorLedger: {
+      version: 1,
+      findings: [
+        {
+          id: "SEC-1",
+          reviewer: "security",
+          status: "open",
+          title: "Existing issue",
+          file: "src/file.txt",
+          line: 1,
+          recommendation: "Fix this",
+        },
+      ],
+    },
     runGit: (args, { encoding = "utf8" } = {}) =>
       execFileSync("git", args, {
         cwd: repoDir,
@@ -282,9 +287,9 @@ test("buildTrustedReviewerInputs injects prior finding memory for scoped files",
   });
 
   const promptContents = fs.readFileSync(result.promptPath, "utf8");
-  assert.match(promptContents, /Previously posted finding comments for files in this reviewer scope/);
+  assert.match(promptContents, /Previous findings ledger entries for this reviewer and scope/);
   assert.match(promptContents, /Existing issue/);
-  assert.match(promptContents, /Do not repeat or restate findings/);
+  assert.match(promptContents, /Do not duplicate already-open findings in new_findings/);
 });
 
 test("buildTrustedReviewerInputs includes all scoped prior findings in prompt", (t) => {
@@ -299,12 +304,14 @@ test("buildTrustedReviewerInputs includes all scoped prior findings in prompt", 
   const schemaPath = path.join(repoDir, "trusted-reviewer-output.schema.json");
   fs.writeFileSync(schemaPath, JSON.stringify({ marker: "schema" }), "utf8");
 
-  const priorFindingEntries = Array.from({ length: 25 }, (_, index) => ({
-    path: "src/file.txt",
+  const priorFindings = Array.from({ length: 25 }, (_, index) => ({
+    id: `SEC-${index + 1}`,
+    reviewer: "security",
+    status: index % 2 === 0 ? "resolved" : "open",
+    title: `Existing issue ${index}`,
+    file: "src/file.txt",
     line: index + 1,
-    resolved: index % 2 === 0,
-    body: `**Security (blocking):** Existing issue ${index}`,
-    url: `https://example.com/comment/${index}`,
+    recommendation: `Fix issue ${index}`,
   }));
 
   const result = buildTrustedReviewerInputs({
@@ -317,7 +324,10 @@ test("buildTrustedReviewerInputs includes all scoped prior findings in prompt", 
     promptRel: ".github/lgtm/prompts/security.md",
     schemaFile: schemaPath,
     outputDir: path.join(repoDir, "tmp-out"),
-    priorFindingEntries,
+    priorLedger: {
+      version: 1,
+      findings: priorFindings,
+    },
     runGit: (args, { encoding = "utf8" } = {}) =>
       execFileSync("git", args, {
         cwd: repoDir,
@@ -327,5 +337,5 @@ test("buildTrustedReviewerInputs includes all scoped prior findings in prompt", 
   });
 
   const promptContents = fs.readFileSync(result.promptPath, "utf8");
-  assert.match(promptContents, /"title":"Existing issue 24"/);
+  assert.match(promptContents, /\"title\":\"Existing issue 24\"/);
 });

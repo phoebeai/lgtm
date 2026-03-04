@@ -6,7 +6,8 @@
     "reviewer",
     "run_state",
     "summary",
-    "findings",
+    "resolved_finding_ids",
+    "new_findings",
     "errors"
   ],
   "properties": {
@@ -26,7 +27,14 @@
     "summary": {
       "type": "string"
     },
-    "findings": {
+    "resolved_finding_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "new_findings": {
       "type": "array",
       "items": {
         "type": "object",
@@ -35,8 +43,7 @@
           "title",
           "file",
           "line",
-          "recommendation",
-          "blocking"
+          "recommendation"
         ],
         "properties": {
           "title": {
@@ -58,8 +65,12 @@
           "recommendation": {
             "type": "string"
           },
-          "blocking": {
-            "type": "boolean"
+          "reopen_finding_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
           }
         }
       }

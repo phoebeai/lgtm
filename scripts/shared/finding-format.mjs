@@ -7,15 +7,12 @@ function normalizeInline(value) {
     .trim();
 }
 
-function normalizeFindingKind(blocking) {
-  return blocking === false ? "non-blocking" : "blocking";
-}
-
 export function formatFindingHeadline({ reviewerLabel, finding }) {
   const normalizedReviewerLabel = normalizeInline(reviewerLabel || "Unknown Reviewer");
+  const findingId = normalizeInline(finding?.id || "");
   const title = normalizeInline(finding?.title || "Untitled finding");
-  const findingKind = normalizeFindingKind(finding?.blocking);
-  return `**${normalizedReviewerLabel} (${findingKind}):** ${title}`;
+  const idSuffix = findingId ? ` [${findingId}]` : "";
+  return `**${normalizedReviewerLabel}${idSuffix}:** ${title}`;
 }
 
 export function formatFindingRecommendation(finding) {

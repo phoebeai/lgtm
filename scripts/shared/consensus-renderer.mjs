@@ -28,10 +28,6 @@ function findingLocation(finding) {
   return file;
 }
 
-function pluralize(count, singular, plural = `${singular}s`) {
-  return count === 1 ? singular : plural;
-}
-
 function formatFinding(entry, labelsByReviewerId) {
   const finding = entry?.finding || {};
   const reviewer = sanitizeInline(entry?.reviewer || "unknown");
@@ -39,33 +35,69 @@ function formatFinding(entry, labelsByReviewerId) {
   const headline = formatFindingHeadline({ reviewerLabel, finding });
   const recommendation = formatFindingRecommendation(finding);
   const location = findingLocation(finding);
-  const locationText = location ? `\`${location}\`` : "`unknown location`";
+  const locationText = location ? `\`${location}\`` : "`global / unknown location`";
+  const statusText = sanitizeInline(entry?.status || "open");
 
   return [
     `- ${headline}`,
+    `  Status: ${statusText}`,
     `  Location: ${locationText}`,
     `  ${recommendation}`,
   ].join("\n");
 }
 
-function pushBlockingFindingsSection(lines, entries, labelsByReviewerId) {
-  if (entries.length === 0) return;
+function pushFindingsSection(lines, title, entries, labelsByReviewerId) {
+  lines.push(`### ${title}`);
+  if (entries.length === 0) {
+    lines.push("- None");
+    lines.push("");
+    return;
+  }
 
-  lines.push("### Blocking Issues");
   for (const entry of entries) {
     lines.push(formatFinding(entry, labelsByReviewerId));
   }
   lines.push("");
 }
 
-function pushBlockingReviewerErrorsSection(lines, reviewerErrors) {
+function pushReviewerErrorsSection(lines, reviewerErrors) {
   if (reviewerErrors.length === 0) return;
 
-  lines.push("### Blocking Reviewer Errors");
+  lines.push("### Reviewer Errors");
   for (const reason of reviewerErrors) {
     lines.push(`- ${sanitizeInline(reason)}`);
   }
   lines.push("");
+}
+
+function normalizeEntries(entries) {
+  return Array.isArray(entries) ? entries : [];
+}
+
+function normalizeOutcomeReason(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (
+    normalized === "PASS_NO_FINDINGS"
+    || normalized === "PASS_HUMAN_BYPASS"
+    || normalized === "FAIL_OPEN_FINDINGS"
+    || normalized === "FAIL_REVIEWER_ERRORS"
+  ) {
+    return normalized;
+  }
+  return "FAIL_OPEN_FINDINGS";
+}
+
+function renderOutcomeSummary({ outcomeReason, openFindingsCount, reviewerErrorsCount }) {
+  switch (normalizeOutcomeReason(outcomeReason)) {
+    case "PASS_NO_FINDINGS":
+      return "No open findings.";
+    case "PASS_HUMAN_BYPASS":
+      return "Human approval bypass is active.";
+    case "FAIL_REVIEWER_ERRORS":
+      return `${reviewerErrorsCount} reviewer error${reviewerErrorsCount === 1 ? "" : "s"} detected.`;
+    default:
+      return `${openFindingsCount} open finding${openFindingsCount === 1 ? "" : "s"} detected.`;
+  }
 }
 
 export function normalizeReviewers(reviewersJson) {
@@ -99,12 +131,11 @@ export function normalizeReviewers(reviewersJson) {
     return {
       id,
       display_name: displayName,
-      required: entry.required !== false,
     };
   });
 }
 
-export function collectFindingsForReviewers({ reports, reviewers }) {
+export function collectNewFindingsForReviewers({ reports, reviewers }) {
   const allFindings = [];
   for (const reviewer of reviewers) {
     const report = reports[reviewer.id];
@@ -112,10 +143,9 @@ export function collectFindingsForReviewers({ reports, reviewers }) {
       continue;
     }
 
-    for (const finding of report.findings) {
+    for (const finding of report.new_findings || []) {
       allFindings.push({
         reviewer: reviewer.id,
-        required: reviewer.required,
         finding,
       });
     }
@@ -136,46 +166,61 @@ export function collectFindingsForReviewers({ reports, reviewers }) {
     return (a.finding?.line || 0) - (b.finding?.line || 0);
   });
 
-  const blockingEntries = allFindings.filter(
-    (entry) => entry.required && entry.finding?.blocking === true,
-  );
-  const nonBlockingEntries = allFindings.filter(
-    (entry) => !(entry.required && entry.finding?.blocking === true),
-  );
-
   return {
     allFindings,
-    blockingEntries,
-    nonBlockingEntries,
   };
 }
 
 export function renderConsensusComment({
   marker,
   outcome,
-  blockingEntries,
+  outcomeReason,
+  openEntries,
+  resolvedEntries,
   reviewerErrors,
   labelsByReviewerId,
+  humanBypass,
 }) {
-  const normalizedBlockingEntries = Array.isArray(blockingEntries) ? blockingEntries : [];
+  const normalizedOpenEntries = normalizeEntries(openEntries);
+  const normalizedResolvedEntries = normalizeEntries(resolvedEntries);
   const normalizedReviewerErrors = Array.isArray(reviewerErrors) ? reviewerErrors : [];
   const normalizedLabelsByReviewerId = labelsByReviewerId instanceof Map ? labelsByReviewerId : new Map();
-  const blockingIssueCount = normalizedBlockingEntries.length + normalizedReviewerErrors.length;
+  const normalizedHumanBypass = humanBypass && typeof humanBypass === "object" ? humanBypass : null;
 
   const lines = [];
   lines.push(marker);
 
-  if (outcome === "PASS") {
+  if (String(outcome).toUpperCase() === "PASS") {
     lines.push("## ✅ LGTM");
-    lines.push("No blocking issues found.");
   } else {
     lines.push("## ❌ LGTM");
-    lines.push(`${blockingIssueCount} blocking ${pluralize(blockingIssueCount, "issue")} found.`);
   }
+
+  lines.push(
+    renderOutcomeSummary({
+      outcomeReason,
+      openFindingsCount: normalizedOpenEntries.length,
+      reviewerErrorsCount: normalizedReviewerErrors.length,
+    }),
+  );
   lines.push("");
 
-  pushBlockingReviewerErrorsSection(lines, normalizedReviewerErrors);
-  pushBlockingFindingsSection(lines, normalizedBlockingEntries, normalizedLabelsByReviewerId);
+  if (normalizedHumanBypass?.approved === true) {
+    const approvers = Array.isArray(normalizedHumanBypass.approvers)
+      ? normalizedHumanBypass.approvers.filter((item) => typeof item === "string" && item.trim().length > 0)
+      : [];
+    lines.push("### Human Bypass");
+    if (approvers.length > 0) {
+      lines.push(`- Approved by: ${approvers.join(", ")}`);
+    } else {
+      lines.push("- Approved by at least one non-bot reviewer on the latest head commit.");
+    }
+    lines.push("");
+  }
+
+  pushReviewerErrorsSection(lines, normalizedReviewerErrors);
+  pushFindingsSection(lines, "Open Findings", normalizedOpenEntries, normalizedLabelsByReviewerId);
+  pushFindingsSection(lines, "Resolved Findings", normalizedResolvedEntries, normalizedLabelsByReviewerId);
 
   return lines.join("\n");
 }

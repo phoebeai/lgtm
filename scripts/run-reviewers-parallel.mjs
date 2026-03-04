@@ -68,24 +68,34 @@ function parseReviewersJson(raw) {
   });
 }
 
-function readPriorFindingEntries(filePath) {
+function makeEmptyLedger() {
+  return {
+    version: 1,
+    findings: [],
+  };
+}
+
+function readPriorLedger(filePath) {
   const normalizedPath = String(filePath || "").trim();
   if (!normalizedPath || !fs.existsSync(normalizedPath)) {
-    return [];
+    return makeEmptyLedger();
   }
 
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
-  } catch (error) {
-    throw new Error(`Invalid prior findings JSON at ${normalizedPath}: ${error.message}`);
+  } catch {
+    return makeEmptyLedger();
   }
 
-  if (!Array.isArray(parsed)) {
-    throw new Error(`Prior findings JSON must be an array: ${normalizedPath}`);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return makeEmptyLedger();
   }
 
-  return parsed;
+  return {
+    ...parsed,
+    findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+  };
 }
 
 function makeRunGitForWorkspace(workspaceDir) {
@@ -174,7 +184,7 @@ async function runSingleReviewer({
   timeoutMs,
   workspaceDir,
   codexBin,
-  priorFindingEntries,
+  priorLedger,
   runGit,
   runReviewerWithCodex,
 }) {
@@ -204,7 +214,7 @@ async function runSingleReviewer({
       promptRel: String(reviewer.prompt_file || ""),
       schemaFile,
       pathFiltersJson: reviewer.paths_json,
-      priorFindingEntries,
+      priorLedger,
       outputDir: promptsDir,
       runGit,
     });
@@ -268,7 +278,7 @@ export async function runReviewersParallel({
   reportsDir,
   reviewerTimeoutMinutes,
   reviewerTimeoutMs,
-  priorFindingsJsonPath,
+  priorLedgerJsonPath,
   workspaceDir,
   codexBin = process.env.CODEX_BIN || "codex",
   runReviewerWithCodex = defaultRunReviewerWithCodex,
@@ -276,7 +286,7 @@ export async function runReviewersParallel({
   const reviewers = parseReviewersJson(reviewersJson);
   const timeoutMs = resolveTimeoutMs({ reviewerTimeoutMinutes, reviewerTimeoutMs });
   const runGit = makeRunGitForWorkspace(workspaceDir);
-  const priorFindingEntries = readPriorFindingEntries(priorFindingsJsonPath);
+  const priorLedger = readPriorLedger(priorLedgerJsonPath);
   fs.mkdirSync(promptsDir, { recursive: true });
   fs.mkdirSync(reportsDir, { recursive: true });
 
@@ -295,7 +305,7 @@ export async function runReviewersParallel({
       timeoutMs,
       workspaceDir,
       codexBin,
-      priorFindingEntries,
+      priorLedger,
       runGit,
       runReviewerWithCodex,
     });
@@ -331,7 +341,7 @@ async function main() {
     promptsDir: readRequiredEnv("PROMPTS_DIR"),
     reportsDir: readRequiredEnv("REPORTS_DIR"),
     reviewerTimeoutMinutes: String(process.env.REVIEWER_TIMEOUT_MINUTES || "10"),
-    priorFindingsJsonPath: String(process.env.PRIOR_FINDINGS_JSON || ""),
+    priorLedgerJsonPath: String(process.env.PRIOR_LEDGER_JSON || ""),
     workspaceDir: readRequiredEnv("WORKSPACE_DIR"),
     codexBin: process.env.CODEX_BIN || "codex",
   });

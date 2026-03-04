@@ -7,11 +7,14 @@ function buildValidRawPayload(overrides = {}) {
     reviewer: "security",
     run_state: "completed",
     summary: "No major issues.",
-    findings: [
+    resolved_finding_ids: ["SEC-1"],
+    new_findings: [
       {
         title: "Sample finding",
         recommendation: "Do the thing.",
-        blocking: false,
+        file: null,
+        line: null,
+        reopen_finding_id: null,
       },
     ],
     errors: [],
@@ -30,29 +33,29 @@ test("returns normalized payload for valid reviewer JSON", () => {
 
   assert.equal(payload.reviewer, "security");
   assert.equal(payload.run_state, "completed");
-  assert.equal(payload.findings.length, 1);
-  assert.equal(payload.findings[0].file, null);
-  assert.equal(payload.findings[0].line, null);
-  assert.equal(payload.findings[0].blocking, false);
+  assert.deepEqual(payload.resolved_finding_ids, ["SEC-1"]);
+  assert.equal(payload.new_findings.length, 1);
+  assert.equal(payload.new_findings[0].file, null);
+  assert.equal(payload.new_findings[0].line, null);
 });
 
-test("normalized findings always include nullable file and line keys", () => {
+test("normalized new_findings always include nullable file and line keys", () => {
   const payload = processReviewerOutput({
     reviewer: "security",
     reviewerActive: "true",
     rawOutput: buildValidRawPayload({
-      findings: [
+      resolved_finding_ids: [],
+      new_findings: [
         {
           title: "Missing location info",
           recommendation: "Keep shape stable.",
-          blocking: false,
         },
         {
           title: "Explicit location info",
           file: "src/titaness/security.py",
           line: "21",
           recommendation: "Preserve parsed values.",
-          blocking: false,
+          reopen_finding_id: "sec-9",
         },
       ],
     }),
@@ -61,15 +64,16 @@ test("normalized findings always include nullable file and line keys", () => {
   });
 
   assert.equal(payload.run_state, "completed");
-  assert.equal(Object.hasOwn(payload.findings[0], "file"), true);
-  assert.equal(Object.hasOwn(payload.findings[0], "line"), true);
-  assert.equal(payload.findings[0].file, null);
-  assert.equal(payload.findings[0].line, null);
+  assert.equal(Object.hasOwn(payload.new_findings[0], "file"), true);
+  assert.equal(Object.hasOwn(payload.new_findings[0], "line"), true);
+  assert.equal(payload.new_findings[0].file, null);
+  assert.equal(payload.new_findings[0].line, null);
 
-  assert.equal(Object.hasOwn(payload.findings[1], "file"), true);
-  assert.equal(Object.hasOwn(payload.findings[1], "line"), true);
-  assert.equal(payload.findings[1].file, "src/titaness/security.py");
-  assert.equal(payload.findings[1].line, 21);
+  assert.equal(Object.hasOwn(payload.new_findings[1], "file"), true);
+  assert.equal(Object.hasOwn(payload.new_findings[1], "line"), true);
+  assert.equal(payload.new_findings[1].file, "src/titaness/security.py");
+  assert.equal(payload.new_findings[1].line, 21);
+  assert.equal(payload.new_findings[1].reopen_finding_id, "SEC-9");
 });
 
 test("returns error payload for invalid JSON", () => {
@@ -116,7 +120,7 @@ test("extracts JSON payload from fenced transcript text", () => {
 
   assert.equal(payload.run_state, "completed");
   assert.equal(payload.reviewer, "security");
-  assert.equal(payload.findings.length, 1);
+  assert.equal(payload.new_findings.length, 1);
 });
 
 test("extracts JSON payload from codex cli transcript lines", () => {
@@ -139,7 +143,7 @@ test("extracts JSON payload from codex cli transcript lines", () => {
 
   assert.equal(payload.run_state, "completed");
   assert.equal(payload.reviewer, "security");
-  assert.equal(payload.findings.length, 1);
+  assert.equal(payload.new_findings.length, 1);
 });
 
 test("returns error payload with descriptive message for missing required fields", () => {
@@ -149,13 +153,14 @@ test("returns error payload with descriptive message for missing required fields
     rawOutput: JSON.stringify({
       reviewer: "security",
       summary: "No major issues.",
+      new_findings: [],
     }),
     stepOutcome: "failure",
     stepConclusion: "failure",
   });
 
   assert.equal(payload.run_state, "error");
-  assert.ok(payload.errors.some((error) => error.includes("findings must be an array")));
+  assert.ok(payload.errors.some((error) => error.includes("resolved_finding_ids must be an array")));
 });
 
 test("normalizes reviewer aliases", () => {
@@ -181,7 +186,8 @@ test("returns skipped payload when reviewer is inactive", () => {
 
   assert.equal(payload.run_state, "skipped");
   assert.equal(payload.summary, "Skipped (no relevant changes)");
-  assert.deepEqual(payload.findings, []);
+  assert.deepEqual(payload.new_findings, []);
+  assert.deepEqual(payload.resolved_finding_ids, []);
 });
 
 test("returns error payload when trusted input build fails for an active reviewer", () => {
@@ -219,15 +225,14 @@ test("returns skipped payload with prompt reason when reviewer has no scoped inp
   assert.equal(payload.summary, "Skipped (No changed files detected for base...head)");
 });
 
-test("finding without blocking boolean yields error payload", () => {
+test("new finding without recommendation yields error payload", () => {
   const payload = processReviewerOutput({
     reviewer: "security",
     reviewerActive: "true",
     rawOutput: buildValidRawPayload({
-      findings: [
+      new_findings: [
         {
-          title: "Missing blocking flag",
-          recommendation: "Set blocking explicitly.",
+          title: "Missing recommendation",
         },
       ],
     }),
@@ -236,57 +241,35 @@ test("finding without blocking boolean yields error payload", () => {
   });
 
   assert.equal(payload.run_state, "error");
-  assert.ok(payload.errors.some((error) => error.includes("missing blocking boolean")));
+  assert.ok(payload.errors.some((error) => error.includes("new finding 0 missing recommendation")));
 });
 
-test("finding without id field is accepted normally", () => {
-  const payload = processReviewerOutput({
-    reviewer: "security",
-    reviewerActive: "true",
-    rawOutput: buildValidRawPayload({
-      findings: [
-        {
-          title: "Finding without id",
-          recommendation: "No id field needed.",
-          blocking: true,
-        },
-      ],
-    }),
-    stepOutcome: "success",
-    stepConclusion: "success",
-  });
-
-  assert.equal(payload.run_state, "completed");
-  assert.equal(payload.findings.length, 1);
-  assert.equal(Object.hasOwn(payload.findings[0], "id"), false);
-  assert.equal(payload.findings[0].blocking, true);
-});
-
-test("transcript-style finding fields are normalized via aliases", () => {
+test("transcript-style new finding fields are normalized via aliases", () => {
   const payload = processReviewerOutput({
     reviewer: "security",
     reviewerActive: "true",
     rawOutput: JSON.stringify({
       reviewer: "security",
       summary: "Recovered from transcript",
-      findings: [
+      resolved_finding_ids: ["sec-1"],
+      new_findings: [
         {
-          message: "Missing id/title/recommendation keys",
+          message: "Missing canonical keys",
           description: "Use description as recommendation fallback.",
-          blocking: true,
           file: "src/titaness/chat/stream.py",
           line: "222",
         },
       ],
+      errors: [],
     }),
     stepOutcome: "failure",
     stepConclusion: "success",
   });
 
   assert.equal(payload.run_state, "completed");
-  assert.equal(payload.findings.length, 1);
-  assert.equal(Object.hasOwn(payload.findings[0], "id"), false);
-  assert.equal(payload.findings[0].title, "Missing id/title/recommendation keys");
-  assert.equal(payload.findings[0].recommendation, "Use description as recommendation fallback.");
-  assert.equal(payload.findings[0].line, 222);
+  assert.equal(payload.new_findings.length, 1);
+  assert.equal(payload.new_findings[0].title, "Missing canonical keys");
+  assert.equal(payload.new_findings[0].recommendation, "Use description as recommendation fallback.");
+  assert.equal(payload.new_findings[0].line, 222);
+  assert.deepEqual(payload.resolved_finding_ids, ["SEC-1"]);
 });

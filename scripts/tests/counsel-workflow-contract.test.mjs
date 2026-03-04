@@ -45,7 +45,7 @@ test("reviewers are executed in parallel via codex sdk wrapper script", () => {
   assert.doesNotMatch(workflow, /npm install -g @openai\/codex/);
   assert.match(
     workflow,
-    /Collect prior finding memory[\s\S]*?run:\s*node workflow-src\/scripts\/collect-pr-finding-memory\.mjs/,
+    /Find prior ledger artifact run[\s\S]*?run:\s*node workflow-src\/scripts\/find-prior-ledger-run\.mjs/,
   );
   assert.match(
     workflow,

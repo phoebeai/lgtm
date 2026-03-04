@@ -1,14 +1,7 @@
 #!/usr/bin/env node
 
-function normalizeFindings(findings) {
+function normalizeNewFindings(findings) {
   return Array.isArray(findings) ? findings : [];
-}
-
-function findingTitle(finding) {
-  if (finding && typeof finding.title === "string" && finding.title.trim().length > 0) {
-    return finding.title.trim();
-  }
-  return "untitled";
 }
 
 export function computeConsensus(
@@ -26,51 +19,33 @@ export function computeConsensus(
   );
 
   const reviewerErrors = [];
-  const optionalReviewerErrors = [];
-  const blockingFindings = [];
-  const optionalBlockingFindings = [];
+  const reviewerNewFindings = [];
 
   for (const reviewer of activeReviewers) {
     const report = reports[reviewer.id] || {};
-    const targetErrors = reviewer.required === false ? optionalReviewerErrors : reviewerErrors;
-    const targetFindings = reviewer.required === false ? optionalBlockingFindings : blockingFindings;
 
     if (report.run_state === "error") {
-      targetErrors.push(`${reviewer.id}: reviewer execution/output error`);
+      reviewerErrors.push(`${reviewer.id}: reviewer execution/output error`);
       continue;
     }
 
-    for (const finding of normalizeFindings(report.findings)) {
-      if (finding?.blocking === true) {
-        targetFindings.push({ reviewer: reviewer.id, finding });
-      }
+    if (report.run_state !== "completed") {
+      continue;
+    }
+
+    for (const finding of normalizeNewFindings(report.new_findings)) {
+      reviewerNewFindings.push({ reviewer: reviewer.id, finding });
     }
   }
 
-  const failureReasons = [
-    ...reviewerErrors,
-    ...blockingFindings.map(({ reviewer, finding }) => {
-      return `${reviewer}: blocking finding (${findingTitle(finding)})`;
-    }),
-  ];
-
-  const optionalFailureReasons = [
-    ...optionalReviewerErrors,
-    ...optionalBlockingFindings.map(({ reviewer, finding }) => {
-      return `${reviewer}: non-blocking finding (${findingTitle(finding)})`;
-    }),
-  ];
-
-  const outcome = failureReasons.length > 0 ? "FAIL" : "PASS";
+  const failureReasons = [...reviewerErrors];
+  const outcome = reviewerErrors.length > 0 ? "FAIL" : "PASS";
 
   return {
     activeReviewers,
     reviewerErrors,
-    optionalReviewerErrors,
-    blockingFindings,
-    optionalBlockingFindings,
+    reviewerNewFindings,
     failureReasons,
-    optionalFailureReasons,
     outcome,
   };
 }
