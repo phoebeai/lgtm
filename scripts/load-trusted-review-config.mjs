@@ -133,7 +133,7 @@ function normalizeReviewers(rawReviewers) {
 
     assertAllowedKeys(
       rawReviewer,
-      new Set(["id", "display_name", "prompt_file", "scope", "paths"]),
+      new Set(["id", "display_name", "prompt_file", "scope", "required", "paths"]),
       label,
     );
 
@@ -149,6 +149,10 @@ function normalizeReviewers(rawReviewers) {
     const displayName = normalizeString(rawReviewer.display_name, `${label}.display_name`);
     const promptFile = ensureSafeRelativePath(rawReviewer.prompt_file, `${label}.prompt_file`);
     const scope = normalizeString(rawReviewer.scope, `${label}.scope`);
+
+    if (rawReviewer.required !== undefined && typeof rawReviewer.required !== "boolean") {
+      throw new Error(`${label}.required must be a boolean when provided`);
+    }
 
     let paths = [];
     if (rawReviewer.paths !== undefined) {

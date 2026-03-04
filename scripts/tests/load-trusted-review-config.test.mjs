@@ -29,10 +29,12 @@ test("load-trusted-review-config reads trusted config from base commit", (t) => 
       "    display_name: Security",
       "    prompt_file: .github/lgtm/prompts/security.md",
       "    scope: security risk",
+      "    required: true",
       "  - id: test_quality",
       "    display_name: Test Quality",
       "    prompt_file: .github/lgtm/prompts/test-quality.md",
       "    scope: test coverage risk",
+      "    required: false",
       "    paths:",
       "      - src/**",
     ].join("\n"),
@@ -79,6 +81,8 @@ test("load-trusted-review-config reads trusted config from base commit", (t) => 
   assert.equal(reviewers.length, 2);
   assert.equal(reviewers[0].id, "security");
   assert.equal(reviewers[1].id, "test_quality");
+  assert.equal(Object.hasOwn(reviewers[0], "required"), false);
+  assert.equal(Object.hasOwn(reviewers[1], "required"), false);
 
   const matrix = JSON.parse(outputs.reviewer_matrix_json);
   assert.equal(matrix.include.length, 2);
