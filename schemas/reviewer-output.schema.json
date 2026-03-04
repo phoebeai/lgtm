@@ -43,7 +43,8 @@
           "title",
           "file",
           "line",
-          "recommendation"
+          "recommendation",
+          "reopen_finding_id"
         ],
         "properties": {
           "title": {
