@@ -1,0 +1,4 @@
+interface:
+  display_name: "LGTM"
+  short_description: "Fetch LGTM ledger + comments and iterate fixes"
+  default_prompt: "Use $lgtm to fetch the latest LGTM run context, prioritize reviewer errors and open findings, read PR comments/replies for steering, and rerun until LGTM passes."

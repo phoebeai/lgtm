@@ -30,7 +30,7 @@ test("ci workflow runs npm tests on all PR and main-branch push changes", () => 
   assert.ok(steps.includes("npm test"));
 });
 
-test("dogfood workflow calls reusable workflow with blocker-first gate settings", () => {
+test("dogfood workflow calls reusable workflow with gate and auto-approval settings", () => {
   const dogfood = readWorkflowObject(DOGFOOD_WORKFLOW_PATH);
 
   assert.equal(dogfood.name, "Dogfood");
@@ -43,7 +43,11 @@ test("dogfood workflow calls reusable workflow with blocker-first gate settings"
   assert.equal(job.with.publish_comment, true);
   assert.equal(job.with.publish_inline_comments, true);
   assert.equal(job.with.enforce_gate, true);
+  assert.equal(job.with.auto_approve_no_findings, true);
   assert.match(String(job.if), /head\.repo\.full_name == github\.repository/);
+  assert.equal(job.secrets.openai_api_key, "${{ secrets.OPENAI_API_KEY }}");
+  assert.equal(job.secrets.github_app_id, "${{ secrets.LGTM_GITHUB_APP_ID }}");
+  assert.equal(job.secrets.github_app_private_key, "${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}");
 });
 
 test("reusable lgtm workflow runs as a single LGTM job", () => {
@@ -56,7 +60,11 @@ test("reusable lgtm workflow runs as a single LGTM job", () => {
   assert.equal(lgtm.jobs.lgtm.name, "LGTM");
   assert.match(
     workflowText,
-    /Collect prior finding memory[\s\S]*?node workflow-src\/scripts\/collect-pr-finding-memory\.mjs/,
+    /Find prior ledger artifact run[\s\S]*?node workflow-src\/scripts\/find-prior-ledger-run\.mjs/,
+  );
+  assert.match(
+    workflowText,
+    /Prepare prior ledger[\s\S]*?node workflow-src\/scripts\/prepare-prior-ledger\.mjs/,
   );
   assert.match(
     workflowText,
@@ -68,7 +76,11 @@ test("reusable lgtm workflow runs as a single LGTM job", () => {
   );
   assert.match(
     workflowText,
-    /Compute pass\/fail consensus[\s\S]*?PRIOR_FINDINGS_JSON:\s*\$\{\{\s*runner\.temp\s*\}\}\/lgtm-prior-findings\.json/,
+    /Compute pass\/fail consensus[\s\S]*?PRIOR_LEDGER_JSON:\s*\$\{\{\s*steps\.prior_ledger\.outputs\.prior_ledger_json\s*\}\}/,
+  );
+  assert.match(
+    workflowText,
+    /Auto-approve PR when no findings[\s\S]*?steps\.consensus\.outputs\.outcome_reason == 'PASS_NO_FINDINGS'/,
   );
 });
 
@@ -107,6 +119,14 @@ test("smoke-consumer workflow pins reusable workflow to v1 and grants required p
   assert.equal(workflow.permissions?.contents, "read");
   assert.equal(workflow.permissions?.["pull-requests"], "write");
   assert.equal(workflow.permissions?.actions, "read");
+  assert.equal(workflow.jobs?.lgtm?.with?.auto_approve_no_findings, true);
+  assert.equal(workflow.jobs?.lgtm?.secrets?.openai_api_key, "${{ secrets.OPENAI_API_KEY }}");
+  assert.equal(workflow.jobs?.lgtm?.secrets?.github_app_id, "${{ secrets.LGTM_GITHUB_APP_ID }}");
+  assert.equal(
+    workflow.jobs?.lgtm?.secrets?.github_app_private_key,
+    "${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}",
+  );
+  assert.deepEqual(workflow.on?.pull_request?.types, ["opened", "reopened", "synchronize", "ready_for_review"]);
 });
 
 test("reviewer output schema allows dynamic reviewer ids", () => {

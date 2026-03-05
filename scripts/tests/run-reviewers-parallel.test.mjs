@@ -40,15 +40,15 @@ async function runScenario({
   headSha,
   schemaPath,
   reviewers,
-  priorFindings = [],
+  priorLedger = { version: 1, findings: [] },
   runReviewerWithCodex,
 }) {
   const promptsDir = fs.mkdtempSync(path.join(repoDir, "tmp-prompts-"));
   const reportsDir = fs.mkdtempSync(path.join(repoDir, "tmp-reports-"));
-  const priorFindingsPath = path.join(repoDir, "prior-findings.json");
+  const priorLedgerPath = path.join(repoDir, "prior-ledger.json");
   fs.writeFileSync(
-    priorFindingsPath,
-    `${JSON.stringify(priorFindings)}\n`,
+    priorLedgerPath,
+    `${JSON.stringify(priorLedger)}\n`,
     "utf8",
   );
 
@@ -64,7 +64,7 @@ async function runScenario({
     promptsDir,
     reportsDir,
     reviewerTimeoutMinutes: "1",
-    priorFindingsJsonPath: priorFindingsPath,
+    priorLedgerJsonPath: priorLedgerPath,
     workspaceDir: repoDir,
     runReviewerWithCodex,
   });
@@ -102,7 +102,8 @@ test("runReviewersParallel executes active reviewer and skips out-of-scope revie
       rawOutput: JSON.stringify({
         reviewer: "security",
         summary: "ok",
-        findings: [],
+        resolved_finding_ids: [],
+        new_findings: [],
         errors: [],
       }),
       outcome: "success",
@@ -145,7 +146,8 @@ test("runReviewersParallel emits error report when trusted prompt build fails", 
       rawOutput: JSON.stringify({
         reviewer: "security",
         summary: "ok",
-        findings: [],
+        resolved_finding_ids: [],
+        new_findings: [],
         errors: [],
       }),
       outcome: "success",
@@ -195,7 +197,8 @@ test("runReviewersParallel rejects duplicate reviewer ids before spawning work",
         rawOutput: JSON.stringify({
           reviewer: "security",
           summary: "ok",
-          findings: [],
+          resolved_finding_ids: [],
+          new_findings: [],
           errors: [],
         }),
         outcome: "success",
@@ -277,7 +280,8 @@ test("runReviewersParallel continues to later reviewers after one reviewer failu
         rawOutput: JSON.stringify({
           reviewer: "test_quality",
           summary: "ok",
-          findings: [],
+          resolved_finding_ids: [],
+          new_findings: [],
           errors: [],
         }),
         outcome: "success",
@@ -330,7 +334,8 @@ test("runReviewersParallel executes active reviewers concurrently", async (t) =>
         rawOutput: JSON.stringify({
           reviewer,
           summary: "ok",
-          findings: [],
+          resolved_finding_ids: [],
+          new_findings: [],
           errors: [],
         }),
         outcome: "success",
@@ -343,7 +348,7 @@ test("runReviewersParallel executes active reviewers concurrently", async (t) =>
   assert.ok(maxActive > 1, `expected parallelism, got maxActive=${maxActive}`);
 });
 
-test("runReviewersParallel injects prior findings into reviewer prompts", async (t) => {
+test("runReviewersParallel injects prior ledger entries into reviewer prompts", async (t) => {
   const { repoDir, baseSha, headSha, schemaPath } = setupReviewRepo(t);
   let capturedPrompt = "";
 
@@ -360,23 +365,28 @@ test("runReviewersParallel injects prior findings into reviewer prompts", async 
         paths_json: "[]",
       },
     ],
-    priorFindings: [
-      {
-        id: 123,
-        path: "src/service.js",
-        line: 1,
-        resolved: true,
-        body: "**Security (blocking):** Existing issue\n\nDo not repeat.",
-        url: "https://example.com/comment/123",
-      },
-    ],
+    priorLedger: {
+      version: 1,
+      findings: [
+        {
+          id: "SEC001",
+          reviewer: "security",
+          status: "resolved",
+          title: "Existing issue",
+          recommendation: "Do not repeat.",
+          file: "src/service.js",
+          line: 1,
+        },
+      ],
+    },
     runReviewerWithCodex: async ({ promptPath }) => {
       capturedPrompt = fs.readFileSync(promptPath, "utf8");
       return {
         rawOutput: JSON.stringify({
           reviewer: "security",
           summary: "ok",
-          findings: [],
+          resolved_finding_ids: [],
+          new_findings: [],
           errors: [],
         }),
         outcome: "success",
@@ -388,8 +398,54 @@ test("runReviewersParallel injects prior findings into reviewer prompts", async 
 
   assert.match(
     capturedPrompt,
-    /Previously posted finding comments for files in this reviewer scope/,
+    /Previous findings ledger entries for this reviewer and scope/,
   );
   assert.match(capturedPrompt, /Existing issue/);
-  assert.match(capturedPrompt, /Do not repeat or restate findings/);
+  assert.match(capturedPrompt, /Do not duplicate already-open findings in new_findings/);
+});
+
+test("runReviewersParallel fails when PRIOR_LEDGER_JSON is malformed", async (t) => {
+  const { repoDir, baseSha, headSha, schemaPath } = setupReviewRepo(t);
+  const promptsDir = fs.mkdtempSync(path.join(repoDir, "tmp-prompts-"));
+  const reportsDir = fs.mkdtempSync(path.join(repoDir, "tmp-reports-"));
+  const priorLedgerPath = path.join(repoDir, "prior-ledger.json");
+  fs.writeFileSync(priorLedgerPath, "{not-json", "utf8");
+
+  await assert.rejects(
+    runReviewersParallel({
+      baseSha,
+      headSha,
+      prNumber: "13",
+      repository: "phoebeai/lgtm",
+      reviewersJson: JSON.stringify([
+        {
+          id: "security",
+          scope: "security risk",
+          prompt_file: ".github/lgtm/prompts/security.md",
+          paths_json: "[]",
+        },
+      ]),
+      resolvedModel: "gpt-5.3-codex",
+      resolvedEffort: "medium",
+      schemaFile: schemaPath,
+      promptsDir,
+      reportsDir,
+      reviewerTimeoutMinutes: "1",
+      priorLedgerJsonPath: priorLedgerPath,
+      workspaceDir: repoDir,
+      runReviewerWithCodex: async () => ({
+        rawOutput: JSON.stringify({
+          reviewer: "security",
+          summary: "ok",
+          resolved_finding_ids: [],
+          new_findings: [],
+          errors: [],
+        }),
+        outcome: "success",
+        conclusion: "success",
+        error: "",
+      }),
+    }),
+    /Invalid PRIOR_LEDGER_JSON/,
+  );
 });

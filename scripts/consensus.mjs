@@ -5,15 +5,22 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { computeConsensus } from "./shared/consensus-core.mjs";
 import {
-  collectFindingsForReviewers,
   normalizeReviewers,
   renderConsensusComment,
 } from "./shared/consensus-renderer.mjs";
-import {
-  publishInlineFindingComments,
-} from "./shared/inline-review-comments.mjs";
 import { writeConsensusOutputs } from "./shared/consensus-output.mjs";
 import { normalizePersistedReviewerReport } from "./shared/reviewer-core.mjs";
+import {
+  mergeLedgerWithReports,
+  normalizeLedger,
+} from "./shared/findings-ledger.mjs";
+import { syncInlineFindingLifecycle } from "./shared/consensus-inline-lifecycle.mjs";
+
+function normalizeText(value) {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
 
 function readReportInput(reportsDir, reviewerId) {
   const reportPath = path.join(reportsDir, `${reviewerId}.json`);
@@ -23,82 +30,60 @@ function readReportInput(reportsDir, reviewerId) {
   return fs.readFileSync(reportPath, "utf8");
 }
 
-function normalizeText(value) {
-  return String(value ?? "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\s+/g, " ")
-    .trim();
+function ensureParentDir(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function normalizeFindingLine(value) {
-  return Number.isInteger(value) && value > 0 ? value : 0;
+function logNonFatalGithubError(context, error) {
+  const message = normalizeText(error?.message || "unknown github api error");
+  process.stderr.write(`[consensus] non-fatal ${context} error: ${message}\n`);
 }
 
-function parseFindingBody(body) {
-  const normalizedBody = String(body ?? "")
-    .replace(/\r\n/g, "\n")
-    .trim();
-  if (!normalizedBody) return null;
-
-  const lines = normalizedBody.split("\n");
-  const headline = String(lines[0] || "").trim();
-  const headlineMatch = headline.match(/^\*\*(.+?)\s+\((blocking|non-blocking)\):\*\*\s*(.+)$/i);
-  if (!headlineMatch) return null;
-
-  const reviewerLabel = normalizeText(headlineMatch[1]);
-  const findingKind = String(headlineMatch[2] || "").toLowerCase();
-  const title = normalizeText(headlineMatch[3]);
-  const recommendation = normalizeText(lines.slice(1).join("\n"));
-
-  return {
-    reviewerLabel,
-    blocking: findingKind === "blocking",
-    title: title || "Untitled finding",
-    recommendation: recommendation || "No recommendation provided.",
-  };
-}
-
-function readPriorFindingsInput(priorFindingsJsonPath) {
-  const normalizedPath = String(priorFindingsJsonPath || "").trim();
+function readLedgerInput(priorLedgerJsonPath) {
+  const normalizedPath = normalizeText(priorLedgerJsonPath);
   if (!normalizedPath || !fs.existsSync(normalizedPath)) {
-    return [];
+    return normalizeLedger(null);
   }
 
-  const raw = fs.readFileSync(normalizedPath, "utf8");
-  let parsed;
+  let parsed = null;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
   } catch (error) {
-    throw new Error(`Invalid PRIOR_FINDINGS_JSON payload: ${error.message}`);
+    throw new Error(`Invalid PRIOR_LEDGER_JSON at ${normalizedPath}: ${error.message}`);
   }
-  return Array.isArray(parsed) ? parsed : [];
+
+  try {
+    return normalizeLedger(parsed);
+  } catch (error) {
+    throw new Error(`Invalid PRIOR_LEDGER_JSON at ${normalizedPath}: ${error.message}`);
+  }
 }
 
-export function collectUnresolvedBlockingPriorEntries(priorFindings) {
-  const entries = [];
-  const normalizedPriorFindings = Array.isArray(priorFindings) ? priorFindings : [];
-
-  for (const prior of normalizedPriorFindings) {
-    if (!prior || typeof prior !== "object") continue;
-    if (prior.resolved !== false) continue;
-
-    const parsedBody = parseFindingBody(prior.body);
-    if (!parsedBody || parsedBody.blocking !== true) continue;
-
-    entries.push({
-      reviewer: parsedBody.reviewerLabel || "Prior Finding",
-      required: true,
-      finding: {
-        title: parsedBody.title,
-        recommendation: parsedBody.recommendation,
-        file: normalizeText(prior.path),
-        line: normalizeFindingLine(prior.line),
-        blocking: true,
-      },
-    });
+function renderFailureReasons({ reviewerErrors, openEntries }) {
+  const reasons = Array.isArray(reviewerErrors) ? [...reviewerErrors] : [];
+  for (const entry of Array.isArray(openEntries) ? openEntries : []) {
+    const finding = entry?.finding || {};
+    const id = normalizeText(finding.id);
+    const title = normalizeText(finding.title) || "Untitled finding";
+    reasons.push(`open-finding: ${id ? `[${id}] ` : ""}${title}`);
   }
+  return reasons;
+}
 
-  return entries;
+function toPresentationEntries(ledgerFindings, status) {
+  return ledgerFindings
+    .filter((entry) => entry.status === status)
+    .map((entry) => ({
+      reviewer: entry.reviewer,
+      status: entry.status,
+      finding: {
+        id: entry.id,
+        title: entry.title,
+        recommendation: entry.recommendation,
+        file: entry.file,
+        line: entry.line,
+      },
+    }));
 }
 
 export function readReportsForReviewers({ reportsDir, reviewers }) {
@@ -112,22 +97,56 @@ export function readReportsForReviewers({ reportsDir, reviewers }) {
   return reports;
 }
 
+function evaluateOutcome({ reviewerErrorsCount, openFindingsCount }) {
+  if (reviewerErrorsCount > 0) {
+    return {
+      outcome: "FAIL",
+      outcomeReason: "FAIL_REVIEWER_ERRORS",
+    };
+  }
+
+  if (openFindingsCount > 0) {
+    return {
+      outcome: "FAIL",
+      outcomeReason: "FAIL_OPEN_FINDINGS",
+    };
+  }
+
+  return {
+    outcome: "PASS",
+    outcomeReason: "PASS_NO_FINDINGS",
+  };
+}
+
 export async function runConsensus({
+  runId,
+  baseSha,
   sha,
+  workspaceDir,
   commentPath,
+  ledgerPath,
   token,
-  signatureSecret,
   repo,
   prNumber,
   marker,
   reportsDir,
   reviewersJson,
   publishInlineComments,
-  priorFindingsJson,
+  priorLedgerJson,
 }) {
   const normalizedReportsDir = String(reportsDir || "").trim();
   if (!normalizedReportsDir) {
     throw new Error("REPORTS_DIR is required");
+  }
+
+  const normalizedCommentPath = String(commentPath || "").trim();
+  if (!normalizedCommentPath) {
+    throw new Error("COMMENT_PATH is required");
+  }
+
+  const normalizedLedgerPath = String(ledgerPath || "").trim();
+  if (!normalizedLedgerPath) {
+    throw new Error("LEDGER_PATH is required");
   }
 
   const reviewers = normalizeReviewers(reviewersJson || "[]");
@@ -135,52 +154,74 @@ export async function runConsensus({
 
   const reports = readReportsForReviewers({ reportsDir: normalizedReportsDir, reviewers });
 
-  let {
+  const {
     reviewerErrors,
-    failureReasons,
   } = computeConsensus(reports, { reviewers });
 
-  const {
-    blockingEntries: reportBlockingEntries,
-  } = collectFindingsForReviewers({ reports, reviewers });
-  const priorFindings = readPriorFindingsInput(priorFindingsJson);
-  const carryoverBlockingEntries = collectUnresolvedBlockingPriorEntries(priorFindings);
-  const blockingEntriesAll = [...reportBlockingEntries, ...carryoverBlockingEntries];
+  const priorLedger = readLedgerInput(priorLedgerJson);
+  const canQueryGithubThreads =
+    normalizeText(token) && normalizeText(repo) && normalizeText(prNumber);
 
-  failureReasons = [
-    ...failureReasons,
-    ...carryoverBlockingEntries.map(({ finding }) => {
-      return `prior-inline: unresolved blocking finding (${finding.title})`;
-    }),
-  ];
-  const outcome = failureReasons.length > 0 ? "FAIL" : "PASS";
+  const merged = mergeLedgerWithReports({
+    priorLedger,
+    reports,
+    reviewers,
+    runId: normalizeText(runId) || "manual",
+    timestamp: new Date().toISOString(),
+  });
+
+  let ledger = merged.ledger;
 
   const shouldPublishInlineComments = String(publishInlineComments ?? "true").toLowerCase() !== "false";
-  if (shouldPublishInlineComments && token && repo && prNumber && sha) {
-    await publishInlineFindingComments({
+  const canUseGithub = canQueryGithubThreads && normalizeText(sha);
+  if (shouldPublishInlineComments && canUseGithub) {
+    ledger = await syncInlineFindingLifecycle({
+      ledger,
+      merged,
       token,
-      signatureSecret,
       repo,
       prNumber,
       headSha: sha,
-      entries: reportBlockingEntries,
       labelsByReviewerId,
+      initialThreadMetadataByCommentId: new Map(),
+      onNonFatalError: logNonFatalGithubError,
     });
   }
+
+  const openEntries = toPresentationEntries(ledger.findings, "open");
+  const resolvedEntries = toPresentationEntries(ledger.findings, "resolved");
+
+  const { outcome, outcomeReason } = evaluateOutcome({
+    reviewerErrorsCount: reviewerErrors.length,
+    openFindingsCount: openEntries.length,
+  });
+
+  const failureReasons = renderFailureReasons({
+    reviewerErrors,
+    openEntries,
+  });
 
   const commentBody = renderConsensusComment({
     marker,
     outcome,
-    blockingEntries: blockingEntriesAll,
+    outcomeReason,
+    openEntries,
+    resolvedEntries,
     reviewerErrors,
     labelsByReviewerId,
   });
-  fs.writeFileSync(commentPath, commentBody, "utf8");
+
+  ensureParentDir(normalizedCommentPath);
+  ensureParentDir(normalizedLedgerPath);
+  fs.writeFileSync(normalizedCommentPath, commentBody, "utf8");
+  fs.writeFileSync(normalizedLedgerPath, `${JSON.stringify(ledger, null, 2)}\n`, "utf8");
 
   writeConsensusOutputs({
     outcome,
-    commentPath,
-    requiredBlockingFindingsCount: blockingEntriesAll.length,
+    outcomeReason,
+    commentPath: normalizedCommentPath,
+    ledgerPath: normalizedLedgerPath,
+    openFindingsCount: openEntries.length,
     reviewerErrorsCount: reviewerErrors.length,
     reports,
     failureReasons,
@@ -188,8 +229,10 @@ export async function runConsensus({
 
   return {
     outcome,
-    commentPath,
-    requiredBlockingFindingsCount: blockingEntriesAll.length,
+    outcomeReason,
+    commentPath: normalizedCommentPath,
+    ledgerPath: normalizedLedgerPath,
+    openFindingsCount: openEntries.length,
     reviewerErrorsCount: reviewerErrors.length,
     reports,
     failureReasons,
@@ -198,17 +241,20 @@ export async function runConsensus({
 
 async function main() {
   await runConsensus({
+    runId: process.env.GITHUB_RUN_ID || "",
+    baseSha: process.env.BASE_SHA || "",
     sha: process.env.SHA || "",
+    workspaceDir: process.env.WORKSPACE_DIR || process.cwd(),
     commentPath: process.env.COMMENT_PATH || "lgtm-comment.md",
+    ledgerPath: process.env.LEDGER_PATH || "lgtm-findings-ledger.json",
     token: process.env.GITHUB_TOKEN || "",
-    signatureSecret: process.env.FINDING_SIGNATURE_SECRET || process.env.GITHUB_TOKEN || "",
     repo: process.env.GITHUB_REPOSITORY || "",
     prNumber: process.env.PR_NUMBER || "",
-    marker: process.env.MARKER || "<!-- codex-lgtm -->",
+    marker: "<!-- lgtm-sticky-comment -->",
     reportsDir: process.env.REPORTS_DIR,
     reviewersJson: process.env.REVIEWERS_JSON || "[]",
     publishInlineComments: process.env.PUBLISH_INLINE_COMMENTS ?? "true",
-    priorFindingsJson: process.env.PRIOR_FINDINGS_JSON || "",
+    priorLedgerJson: process.env.PRIOR_LEDGER_JSON || "",
   });
 }
 

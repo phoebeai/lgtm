@@ -4,6 +4,78 @@ import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { githubRequest, githubRequestAllPages } from "./shared/github-client.mjs";
 
+function normalizeLogin(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function parseTrustedOwnerLogins(value) {
+  return String(value || "")
+    .split(/[,\s]+/u)
+    .map((item) => normalizeLogin(item))
+    .filter(Boolean);
+}
+
+function isTrustedStickyOwner(login, trustedOwners) {
+  return trustedOwners.has(normalizeLogin(login));
+}
+
+function parseCommentUpdatedAt(comment) {
+  const raw = String(comment?.updated_at || comment?.created_at || "").trim();
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function selectMostRecentlyUpdatedComment(comments) {
+  if (!Array.isArray(comments) || comments.length === 0) return null;
+  return [...comments].sort((left, right) => {
+    return parseCommentUpdatedAt(right) - parseCommentUpdatedAt(left);
+  })[0];
+}
+
+export async function resolveTrustedStickyOwners({
+  apiBase,
+  token,
+  trustedOwnerLogins,
+  request = githubRequest,
+}) {
+  const owners = new Set(parseTrustedOwnerLogins(trustedOwnerLogins));
+  if (owners.size > 0) {
+    return owners;
+  }
+
+  // GitHub App installation tokens can derive a stable bot login from app_slug.
+  try {
+    const installation = await request({
+      method: "GET",
+      url: `${apiBase}/installation`,
+      token,
+    });
+    const appSlug = normalizeLogin(installation?.app_slug);
+    if (appSlug) {
+      owners.add(`${appSlug}[bot]`);
+    }
+  } catch {
+    // Ignore lookup failures; other trusted-owner sources may still be available.
+  }
+
+  // User/bot tokens can resolve their actor login directly.
+  try {
+    const viewer = await request({
+      method: "GET",
+      url: "https://api.github.com/user",
+      token,
+    });
+    const viewerLogin = normalizeLogin(viewer?.login);
+    if (viewerLogin) {
+      owners.add(viewerLogin);
+    }
+  } catch {
+    // Ignore lookup failures; explicit trusted owner input may still be set.
+  }
+
+  return owners;
+}
+
 export async function listIssueComments({ apiBase, prNumber, token }) {
   return githubRequestAllPages({
     token,
@@ -15,9 +87,9 @@ export async function upsertPrComment({
   token,
   repo,
   prNumber,
-  marker = "<!-- codex-lgtm -->",
+  marker = "<!-- lgtm-sticky-comment -->",
   commentPath,
-  actor,
+  trustedOwnerLogins = process.env.STICKY_COMMENT_TRUSTED_OWNERS || "",
 }) {
   const normalizedToken = String(token || "").trim();
   const normalizedRepo = String(repo || "").trim();
@@ -34,20 +106,21 @@ export async function upsertPrComment({
 
   const body = fs.readFileSync(normalizedCommentPath, "utf8");
   const apiBase = `https://api.github.com/repos/${owner}/${name}`;
-  const botAuthorLogins = new Set(
-    ["github-actions[bot]", actor].filter(
-      (value) => typeof value === "string" && value.length > 0
-    )
-  );
+  const trustedOwners = await resolveTrustedStickyOwners({
+    apiBase,
+    token: normalizedToken,
+    trustedOwnerLogins,
+  });
 
   const comments = await listIssueComments({ apiBase, prNumber: normalizedPrNumber, token: normalizedToken });
 
-  const existing = comments.find(
-    (comment) =>
+  const existing = selectMostRecentlyUpdatedComment(
+    comments.filter(
+      (comment) =>
       typeof comment.body === "string" &&
       comment.body.includes(marker) &&
-      typeof comment?.user?.login === "string" &&
-      botAuthorLogins.has(comment.user.login)
+      isTrustedStickyOwner(comment?.user?.login, trustedOwners),
+    ),
   );
 
   if (existing) {
@@ -75,9 +148,9 @@ async function main() {
     token: process.env.GITHUB_TOKEN,
     repo: process.env.GITHUB_REPOSITORY,
     prNumber: process.env.PR_NUMBER,
-    marker: process.env.MARKER || "<!-- codex-lgtm -->",
+    marker: "<!-- lgtm-sticky-comment -->",
     commentPath: process.env.COMMENT_PATH,
-    actor: process.env.GITHUB_ACTOR,
+    trustedOwnerLogins: process.env.STICKY_COMMENT_TRUSTED_OWNERS || "",
   });
 
   if (result.action === "updated") {

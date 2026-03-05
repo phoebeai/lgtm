@@ -34,6 +34,23 @@ function parseYamlOrJson(input, sourceLabel) {
   }
 }
 
+function stripLegacyReviewerRequired(rawConfig) {
+  if (!isPlainObject(rawConfig) || !Array.isArray(rawConfig.reviewers)) {
+    return rawConfig;
+  }
+
+  return {
+    ...rawConfig,
+    reviewers: rawConfig.reviewers.map((rawReviewer) => {
+      if (!isPlainObject(rawReviewer) || !Object.prototype.hasOwnProperty.call(rawReviewer, "required")) {
+        return rawReviewer;
+      }
+      const { required: _ignoredRequired, ...rest } = rawReviewer;
+      return rest;
+    }),
+  };
+}
+
 function loadConfigSchema() {
   const schemaUrl = new URL("../schemas/lgtm-config.schema.json", import.meta.url);
   try {
@@ -133,7 +150,7 @@ function normalizeReviewers(rawReviewers) {
 
     assertAllowedKeys(
       rawReviewer,
-      new Set(["id", "display_name", "prompt_file", "scope", "required", "paths"]),
+      new Set(["id", "display_name", "prompt_file", "scope", "paths"]),
       label,
     );
 
@@ -150,11 +167,6 @@ function normalizeReviewers(rawReviewers) {
     const promptFile = ensureSafeRelativePath(rawReviewer.prompt_file, `${label}.prompt_file`);
     const scope = normalizeString(rawReviewer.scope, `${label}.scope`);
 
-    const required = rawReviewer.required === undefined ? true : rawReviewer.required;
-    if (typeof required !== "boolean") {
-      throw new Error(`${label}.required must be a boolean when provided`);
-    }
-
     let paths = [];
     if (rawReviewer.paths !== undefined) {
       if (!Array.isArray(rawReviewer.paths)) {
@@ -170,7 +182,6 @@ function normalizeReviewers(rawReviewers) {
       display_name: displayName,
       prompt_file: promptFile,
       scope,
-      required,
       paths_json: JSON.stringify(paths),
     };
   });
@@ -257,7 +268,9 @@ export function loadTrustedReviewConfig({
     "trusted review config in base revision",
     runGit,
   );
-  const parsed = parseYamlOrJson(rawConfig, `${normalizedBaseSha}:${normalizedConfigRel}`);
+  const parsed = stripLegacyReviewerRequired(
+    parseYamlOrJson(rawConfig, `${normalizedBaseSha}:${normalizedConfigRel}`),
+  );
   validateConfigAgainstSchema(parsed, loadConfigSchema(), `${normalizedBaseSha}:${normalizedConfigRel}`);
   const config = normalizeConfig(parsed);
 
@@ -283,20 +296,8 @@ export function loadTrustedReviewConfig({
     fieldName: "effort",
   });
 
-  const reviewerMatrix = {
-    include: config.reviewers.map((reviewer) => ({
-      id: reviewer.id,
-      display_name: reviewer.display_name,
-      prompt_file: reviewer.prompt_file,
-      scope: reviewer.scope,
-      required: reviewer.required,
-      paths_json: reviewer.paths_json,
-    })),
-  };
-
   return {
     reviewersJson: JSON.stringify(config.reviewers),
-    reviewerMatrixJson: JSON.stringify(reviewerMatrix),
     resolvedModel,
     resolvedEffort,
   };
@@ -314,7 +315,6 @@ function main() {
   });
 
   writeGithubOutput("reviewers_json", result.reviewersJson);
-  writeGithubOutput("reviewer_matrix_json", result.reviewerMatrixJson);
   writeGithubOutput("resolved_model", result.resolvedModel);
   writeGithubOutput("resolved_effort", result.resolvedEffort);
 

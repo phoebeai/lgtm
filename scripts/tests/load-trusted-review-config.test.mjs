@@ -79,11 +79,6 @@ test("load-trusted-review-config reads trusted config from base commit", (t) => 
   assert.equal(reviewers.length, 2);
   assert.equal(reviewers[0].id, "security");
   assert.equal(reviewers[1].id, "test_quality");
-
-  const matrix = JSON.parse(outputs.reviewer_matrix_json);
-  assert.equal(matrix.include.length, 2);
-  assert.equal(matrix.include[1].id, "test_quality");
-  assert.equal(matrix.include[1].paths_json, JSON.stringify(["src/**"]));
 });
 
 test("load-trusted-review-config allows explicit input model/effort overrides", (t) => {
@@ -160,6 +155,45 @@ test("load-trusted-review-config fails on invalid config keys", (t) => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /unknown_field/);
+});
+
+test("load-trusted-review-config ignores deprecated reviewers[].required", (t) => {
+  const repoDir = createRepo(t, "lgtm-config-");
+
+  writeRepoFile(repoDir, ".github/lgtm/prompts/security.md", "Security prompt");
+  writeRepoFile(
+    repoDir,
+    ".github/lgtm.yml",
+    [
+      "version: 1",
+      "reviewers:",
+      "  - id: security",
+      "    display_name: Security",
+      "    prompt_file: .github/lgtm/prompts/security.md",
+      "    scope: security risk",
+      "    required: true",
+    ].join("\n"),
+  );
+  const sha = commitAll(repoDir, "base");
+
+  const { stdout, outputs } = runScript({
+    repoDir,
+    scriptPath: SCRIPT_PATH,
+    env: {
+      BASE_SHA: sha,
+      HEAD_SHA: sha,
+      CONFIG_REL: ".github/lgtm.yml",
+      INPUT_MODEL: "",
+      INPUT_EFFORT: "",
+      FALLBACK_MODEL: "fallback-model",
+      FALLBACK_EFFORT: "fallback-effort",
+    },
+  });
+
+  const summary = JSON.parse(stdout);
+  assert.equal(summary.reviewer_count, 1);
+  assert.equal(outputs.resolved_model, "fallback-model");
+  assert.equal(outputs.resolved_effort, "fallback-effort");
 });
 
 test("load-trusted-review-config fails when trusted prompt is missing in base revision", (t) => {

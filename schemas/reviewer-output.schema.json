@@ -6,7 +6,8 @@
     "reviewer",
     "run_state",
     "summary",
-    "findings",
+    "resolved_finding_ids",
+    "new_findings",
     "errors"
   ],
   "properties": {
@@ -26,7 +27,15 @@
     "summary": {
       "type": "string"
     },
-    "findings": {
+    "resolved_finding_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z][A-Za-z0-9]{0,15}(?:[-_]?[0-9]+)$"
+      }
+    },
+    "new_findings": {
       "type": "array",
       "items": {
         "type": "object",
@@ -36,7 +45,7 @@
           "file",
           "line",
           "recommendation",
-          "blocking"
+          "reopen_finding_id"
         ],
         "properties": {
           "title": {
@@ -58,8 +67,13 @@
           "recommendation": {
             "type": "string"
           },
-          "blocking": {
-            "type": "boolean"
+          "reopen_finding_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9]{0,15}(?:[-_]?[0-9]+)$"
           }
         }
       }

@@ -7,8 +7,8 @@ import { pathToFileURL } from "node:url";
 import { Codex } from "@openai/codex-sdk";
 import { buildTrustedReviewerInputs } from "./build-trusted-reviewer-inputs.mjs";
 import { processReviewerOutput } from "./normalize-reviewer-output.mjs";
-
-const REVIEWER_ID_PATTERN = /^[a-z0-9_]+$/;
+import { normalizeLedger } from "./shared/findings-ledger.mjs";
+import { parseReviewersForRunner } from "./shared/reviewers-json.mjs";
 
 function readRequiredEnv(name) {
   const value = String(process.env[name] || "").trim();
@@ -18,74 +18,31 @@ function readRequiredEnv(name) {
   return value;
 }
 
-function parseReviewersJson(raw) {
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Invalid REVIEWERS_JSON: ${error.message}`);
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("REVIEWERS_JSON must contain at least one reviewer");
-  }
-
-  const seenReviewerIds = new Set();
-  return parsed.map((entry, index) => {
-    const label = `REVIEWERS_JSON[${index}]`;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error(`${label} must be an object`);
-    }
-
-    const reviewerId = String(entry.id || "").trim();
-    if (!REVIEWER_ID_PATTERN.test(reviewerId)) {
-      throw new Error(`${label}.id must match ^[a-z0-9_]+$`);
-    }
-    if (seenReviewerIds.has(reviewerId)) {
-      throw new Error(`Duplicate reviewer id in REVIEWERS_JSON: ${reviewerId}`);
-    }
-    seenReviewerIds.add(reviewerId);
-
-    const promptFile = String(entry.prompt_file || "").trim();
-    if (!promptFile) {
-      throw new Error(`${label}.prompt_file must be a non-empty string`);
-    }
-
-    const scope = String(entry.scope || "").trim();
-    if (!scope) {
-      throw new Error(`${label}.scope must be a non-empty string`);
-    }
-
-    return {
-      ...entry,
-      id: reviewerId,
-      prompt_file: promptFile,
-      scope,
-      paths_json:
-        entry.paths_json === undefined || entry.paths_json === null
-          ? "[]"
-          : String(entry.paths_json),
-    };
-  });
+function makeEmptyLedger() {
+  return {
+    version: 1,
+    findings: [],
+  };
 }
 
-function readPriorFindingEntries(filePath) {
+function readPriorLedger(filePath) {
   const normalizedPath = String(filePath || "").trim();
   if (!normalizedPath || !fs.existsSync(normalizedPath)) {
-    return [];
+    return makeEmptyLedger();
   }
 
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
   } catch (error) {
-    throw new Error(`Invalid prior findings JSON at ${normalizedPath}: ${error.message}`);
+    throw new Error(`Invalid PRIOR_LEDGER_JSON (${normalizedPath}): ${error.message}`);
   }
 
-  if (!Array.isArray(parsed)) {
-    throw new Error(`Prior findings JSON must be an array: ${normalizedPath}`);
+  try {
+    return normalizeLedger(parsed);
+  } catch (error) {
+    throw new Error(`Invalid PRIOR_LEDGER_JSON (${normalizedPath}): ${error.message}`);
   }
-
-  return parsed;
 }
 
 function makeRunGitForWorkspace(workspaceDir) {
@@ -174,7 +131,7 @@ async function runSingleReviewer({
   timeoutMs,
   workspaceDir,
   codexBin,
-  priorFindingEntries,
+  priorLedger,
   runGit,
   runReviewerWithCodex,
 }) {
@@ -204,7 +161,7 @@ async function runSingleReviewer({
       promptRel: String(reviewer.prompt_file || ""),
       schemaFile,
       pathFiltersJson: reviewer.paths_json,
-      priorFindingEntries,
+      priorLedger,
       outputDir: promptsDir,
       runGit,
     });
@@ -268,15 +225,15 @@ export async function runReviewersParallel({
   reportsDir,
   reviewerTimeoutMinutes,
   reviewerTimeoutMs,
-  priorFindingsJsonPath,
+  priorLedgerJsonPath,
   workspaceDir,
   codexBin = process.env.CODEX_BIN || "codex",
   runReviewerWithCodex = defaultRunReviewerWithCodex,
 }) {
-  const reviewers = parseReviewersJson(reviewersJson);
+  const reviewers = parseReviewersForRunner(reviewersJson);
   const timeoutMs = resolveTimeoutMs({ reviewerTimeoutMinutes, reviewerTimeoutMs });
   const runGit = makeRunGitForWorkspace(workspaceDir);
-  const priorFindingEntries = readPriorFindingEntries(priorFindingsJsonPath);
+  const priorLedger = readPriorLedger(priorLedgerJsonPath);
   fs.mkdirSync(promptsDir, { recursive: true });
   fs.mkdirSync(reportsDir, { recursive: true });
 
@@ -295,7 +252,7 @@ export async function runReviewersParallel({
       timeoutMs,
       workspaceDir,
       codexBin,
-      priorFindingEntries,
+      priorLedger,
       runGit,
       runReviewerWithCodex,
     });
@@ -331,7 +288,7 @@ async function main() {
     promptsDir: readRequiredEnv("PROMPTS_DIR"),
     reportsDir: readRequiredEnv("REPORTS_DIR"),
     reviewerTimeoutMinutes: String(process.env.REVIEWER_TIMEOUT_MINUTES || "10"),
-    priorFindingsJsonPath: String(process.env.PRIOR_FINDINGS_JSON || ""),
+    priorLedgerJsonPath: String(process.env.PRIOR_LEDGER_JSON || ""),
     workspaceDir: readRequiredEnv("WORKSPACE_DIR"),
     codexBin: process.env.CODEX_BIN || "codex",
   });

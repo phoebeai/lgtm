@@ -3,27 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-
-function parseReviewers(reviewersJson) {
-  let parsed;
-  try {
-    parsed = JSON.parse(String(reviewersJson || "[]"));
-  } catch (error) {
-    throw new Error(`Invalid REVIEWERS_JSON: ${error.message}`);
-  }
-
-  if (!Array.isArray(parsed)) {
-    throw new Error("REVIEWERS_JSON must be a JSON array");
-  }
-
-  return parsed.map((entry, index) => {
-    const reviewerId = String(entry?.id || "").trim();
-    if (!reviewerId) {
-      throw new Error(`REVIEWERS_JSON[${index}].id must be a non-empty string`);
-    }
-    return reviewerId;
-  });
-}
+import { parseReviewerIds } from "./shared/reviewers-json.mjs";
 
 function writeTextFile(filePath, value) {
   const normalized = String(value ?? "");
@@ -43,9 +23,10 @@ export function persistConsensusArtifacts({
   reviewersJson,
   consensusReports,
   outcome,
-  blockingFindingsCount,
+  openFindingsCount,
   reviewerErrorsCount,
   commentPath,
+  ledgerPath,
 }) {
   const normalizedRunnerTemp = String(runnerTemp || "").trim();
   if (!normalizedRunnerTemp) {
@@ -56,8 +37,12 @@ export function persistConsensusArtifacts({
   if (!normalizedCommentPath) {
     throw new Error("COMMENT_PATH is required");
   }
+  const normalizedLedgerPath = String(ledgerPath || "").trim();
+  if (!normalizedLedgerPath) {
+    throw new Error("LEDGER_PATH is required");
+  }
 
-  const reviewerIds = parseReviewers(reviewersJson);
+  const reviewerIds = parseReviewerIds(reviewersJson);
   const sourceReportsDir = path.join(normalizedRunnerTemp, "lgtm-reports");
   const targetDir = path.join(normalizedRunnerTemp, "lgtm");
   fs.mkdirSync(targetDir, { recursive: true });
@@ -70,9 +55,12 @@ export function persistConsensusArtifacts({
 
   writeTextFile(path.join(targetDir, "reports-merged.json"), consensusReports);
   writeTextFile(path.join(targetDir, "outcome.txt"), outcome);
-  writeTextFile(path.join(targetDir, "blocking-findings-count.txt"), blockingFindingsCount);
+  writeTextFile(path.join(targetDir, "open-findings-count.txt"), openFindingsCount);
+  // Backward-compat artifact path retained for external consumers.
+  writeTextFile(path.join(targetDir, "blocking-findings-count.txt"), openFindingsCount);
   writeTextFile(path.join(targetDir, "reviewer-errors-count.txt"), reviewerErrorsCount);
   fs.copyFileSync(normalizedCommentPath, path.join(targetDir, "comment.md"));
+  fs.copyFileSync(normalizedLedgerPath, path.join(targetDir, "findings-ledger.json"));
 }
 
 function main() {
@@ -81,9 +69,10 @@ function main() {
     reviewersJson: process.env.REVIEWERS_JSON,
     consensusReports: process.env.CONSENSUS_REPORTS,
     outcome: process.env.OUTCOME,
-    blockingFindingsCount: process.env.BLOCKING_FINDINGS_COUNT,
+    openFindingsCount: process.env.OPEN_FINDINGS_COUNT || process.env.BLOCKING_FINDINGS_COUNT,
     reviewerErrorsCount: process.env.REVIEWER_ERRORS_COUNT,
     commentPath: process.env.COMMENT_PATH,
+    ledgerPath: process.env.LEDGER_PATH,
   });
 }
 

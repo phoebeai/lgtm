@@ -53,9 +53,20 @@ on:
         required: false
         type: number
         default: 10
+      auto_approve_no_findings:
+        description: When true, submit an APPROVE review on PASS_NO_FINDINGS outcomes.
+        required: false
+        type: boolean
+        default: false
     secrets:
       openai_api_key:
         description: OpenAI API key for Codex reviewer execution.
+        required: true
+      github_app_id:
+        description: GitHub App ID used to mint installation token for LGTM GitHub API operations.
+        required: true
+      github_app_private_key:
+        description: GitHub App private key (PEM) used to mint installation token.
         required: true
 
 concurrency:
@@ -96,6 +107,14 @@ jobs:
             echo "workflow_ref=$workflow_ref"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Create GitHub App installation token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          owner: ${{ github.repository_owner }}
+
       - name: Resolve pull request metadata
         id: pr
         env:
@@ -104,7 +123,7 @@ jobs:
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
           API_URL: ${{ github.api_url }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -181,15 +200,30 @@ jobs:
           FALLBACK_EFFORT: xhigh
         run: node workflow-src/scripts/load-trusted-review-config.mjs
 
-      - name: Collect prior finding memory
+      - name: Find prior ledger artifact run
+        id: prior_ledger_run
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FINDING_SIGNATURE_SECRET: ${{ secrets.openai_api_key }}
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          PRIOR_FINDINGS_JSON: ${{ runner.temp }}/lgtm-prior-findings.json
-          PRIOR_FINDINGS_MD: ${{ runner.temp }}/lgtm-prior-findings.md
-        run: node workflow-src/scripts/collect-pr-finding-memory.mjs
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node workflow-src/scripts/find-prior-ledger-run.mjs
+
+      - name: Download prior ledger artifact
+        if: ${{ steps.prior_ledger_run.outputs.prior_run_id != '' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ steps.prior_ledger_run.outputs.prior_artifact_name }}
+          run-id: ${{ steps.prior_ledger_run.outputs.prior_run_id }}
+          github-token: ${{ steps.app_token.outputs.token }}
+          path: ${{ runner.temp }}/lgtm-prior-artifact
+
+      - name: Prepare prior ledger
+        id: prior_ledger
+        env:
+          PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
+          PRIOR_LEDGER_JSON: ${{ runner.temp }}/lgtm-prior-ledger.json
+        run: node workflow-src/scripts/prepare-prior-ledger.mjs
 
       - name: Run reviewers
         env:
@@ -204,7 +238,7 @@ jobs:
           SCHEMA_FILE: ${{ github.workspace }}/workflow-src/schemas/reviewer-output.schema.json
           PROMPTS_DIR: ${{ runner.temp }}/lgtm-prompts
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
-          PRIOR_FINDINGS_JSON: ${{ runner.temp }}/lgtm-prior-findings.json
+          PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
           REVIEWER_TIMEOUT_MINUTES: ${{ inputs.reviewer_timeout_minutes }}
           WORKSPACE_DIR: ${{ github.workspace }}
           CODEX_BIN: ${{ github.workspace }}/workflow-src/node_modules/.bin/codex
@@ -256,16 +290,26 @@ jobs:
         env:
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FINDING_SIGNATURE_SECRET: ${{ secrets.openai_api_key }}
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          MARKER: "<!-- codex-lgtm -->"
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           SHA: ${{ steps.pr.outputs.head_sha }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          WORKSPACE_DIR: ${{ github.workspace }}
           COMMENT_PATH: ${{ runner.temp }}/lgtm-comment.md
+          LEDGER_PATH: ${{ runner.temp }}/lgtm-findings-ledger.json
           PUBLISH_INLINE_COMMENTS: ${{ inputs.publish_inline_comments }}
-          PRIOR_FINDINGS_JSON: ${{ runner.temp }}/lgtm-prior-findings.json
+          PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
         run: node workflow-src/scripts/consensus.mjs
+
+      - name: Auto-approve PR when no findings
+        if: ${{ always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason == 'PASS_NO_FINDINGS' }}
+        env:
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SHA: ${{ steps.pr.outputs.head_sha }}
+        run: node workflow-src/scripts/approve-pr-when-clean.mjs
 
       - name: Persist consensus artifacts
         if: ${{ always() }}
@@ -273,9 +317,10 @@ jobs:
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
           CONSENSUS_REPORTS: ${{ steps.consensus.outputs.reports_json }}
           OUTCOME: ${{ steps.consensus.outputs.outcome }}
-          BLOCKING_FINDINGS_COUNT: ${{ steps.consensus.outputs.blocking_findings_count }}
+          OPEN_FINDINGS_COUNT: ${{ steps.consensus.outputs.open_findings_count }}
           REVIEWER_ERRORS_COUNT: ${{ steps.consensus.outputs.reviewer_errors_count }}
           COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
+          LEDGER_PATH: ${{ steps.consensus.outputs.ledger_path }}
         run: node workflow-src/scripts/persist-consensus-artifacts.mjs
 
       - name: Upload LGTM artifact
@@ -289,10 +334,9 @@ jobs:
       - name: Upsert sticky PR comment
         if: ${{ always() && inputs.publish_comment }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          MARKER: "<!-- codex-lgtm -->"
           COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
         run: node workflow-src/scripts/upsert-pr-comment.mjs
 

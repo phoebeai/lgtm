@@ -31,6 +31,9 @@ jobs:
       publish_comment: true
       publish_inline_comments: true
       enforce_gate: true
+      auto_approve_no_findings: true
       pull_request_number: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || 0 }}
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}
+      github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}
