@@ -87,13 +87,12 @@ def approve_pr_when_clean(
         )
         return
 
-    body = "LGTM automation: no open findings in the latest run."
     try:
         request(
             method="POST",
             token=normalized_token,
             url=f"https://api.github.com/repos/{owner}/{name}/pulls/{normalized_pr_number}/reviews",
-            body={"event": "APPROVE", "body": body},
+            body={"event": "APPROVE"},
         )
     except Exception as error:
         message = str(error)
