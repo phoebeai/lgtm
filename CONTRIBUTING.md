@@ -6,18 +6,21 @@ Thanks for contributing to LGTM.
 
 Requirements:
 
-- Node.js `>=20`
+- Python `>=3.12`
+- `uv`
 
 Install dependencies:
 
 ```bash
-npm ci --ignore-scripts
+uv sync --all-groups
 ```
 
 Run tests:
 
 ```bash
-npm test
+uv run pytest
+uv run ruff check scripts tests
+uv run ty check scripts tests
 ```
 
 ## What To Update With Changes
@@ -28,13 +31,13 @@ When making runtime or workflow changes, update all affected assets together:
 - workflow wiring in `.github/workflows/lgtm.yml`
 - schemas in `schemas/`
 - docs and examples in `README.md` and `examples/`
-- contract tests in `scripts/tests/`
+- tests in `tests/`
 
 ## Testing Expectations
 
 Before opening a PR:
 
-1. Run `npm test` locally.
+1. Run `uv run pytest`, `uv run ruff check scripts tests`, and `uv run ty check scripts tests`.
 2. Ensure example configs remain valid against `schemas/lgtm-config.schema.json`.
 3. Keep `README.md` examples aligned with shipped workflow inputs.
 

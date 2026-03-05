@@ -28,11 +28,6 @@ on:
         required: false
         type: string
         default: ""
-      effort:
-        description: Override effort for all reviewers. Empty uses config/default.
-        required: false
-        type: string
-        default: ""
       publish_comment:
         description: Whether to upsert a sticky PR comment.
         required: false
@@ -58,15 +53,20 @@ on:
         required: false
         type: boolean
         default: false
+      sticky_comment_trusted_owners:
+        description: Optional allowlist of sticky comment owners (space/comma separated logins).
+        required: false
+        type: string
+        default: ""
     secrets:
       openai_api_key:
         description: OpenAI API key for Codex reviewer execution.
         required: true
-      github_app_id:
-        description: GitHub App ID used to mint installation token for LGTM GitHub API operations.
+      lgtm_github_app_id:
+        description: GitHub App ID used to mint an installation token in this job.
         required: true
-      github_app_private_key:
-        description: GitHub App private key (PEM) used to mint installation token.
+      lgtm_github_app_private_key:
+        description: GitHub App private key used to mint an installation token in this job.
         required: true
 
 concurrency:
@@ -107,13 +107,23 @@ jobs:
             echo "workflow_ref=$workflow_ref"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub App installation token
-        id: app_token
+      - name: Setup uv
+        id: setup_uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Mint GitHub App installation token
+        id: github_token
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.github_app_id }}
-          private-key: ${{ secrets.github_app_private_key }}
+          app-id: ${{ secrets.lgtm_github_app_id }}
+          private-key: ${{ secrets.lgtm_github_app_private_key }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: write
 
       - name: Resolve pull request metadata
         id: pr
@@ -123,7 +133,7 @@ jobs:
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
-          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           API_URL: ${{ github.api_url }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -142,9 +152,9 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               "$API_URL/repos/$REPOSITORY/pulls/$INPUT_PR_NUMBER")"
 
-            pr_number="$(printf '%s' "$pr_json" | node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(pr.number));')"
-            base_sha="$(printf '%s' "$pr_json" | node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(pr.base.sha);')"
-            head_sha="$(printf '%s' "$pr_json" | node -e 'const fs=require("node:fs"); const pr=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(pr.head.sha);')"
+            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"number\"], end=\"\")')"
+            base_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"base\"][\"sha\"], end=\"\")')"
+            head_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"head\"][\"sha\"], end=\"\")')"
           else
             echo "This reusable workflow requires pull_request context or pull_request_number for workflow_dispatch." >&2
             exit 1
@@ -177,16 +187,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: workflow-src/package-lock.json
-
       - name: Install workflow dependencies
         working-directory: workflow-src
-        run: npm ci --ignore-scripts
+        run: uv sync --all-groups
 
       - name: Load trusted review config
         id: config
@@ -195,19 +198,17 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           CONFIG_REL: ${{ inputs.config_path }}
           INPUT_MODEL: ${{ inputs.model }}
-          INPUT_EFFORT: ${{ inputs.effort }}
           FALLBACK_MODEL: gpt-5.3-codex
-          FALLBACK_EFFORT: xhigh
-        run: node workflow-src/scripts/load-trusted-review-config.mjs
+        run: uv run --project workflow-src python -m scripts.load_trusted_review_config
 
       - name: Find prior ledger artifact run
         id: prior_ledger_run
         env:
-          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           GITHUB_RUN_ID: ${{ github.run_id }}
-        run: node workflow-src/scripts/find-prior-ledger-run.mjs
+        run: uv run --project workflow-src python -m scripts.find_prior_ledger_run
 
       - name: Download prior ledger artifact
         if: ${{ steps.prior_ledger_run.outputs.prior_run_id != '' }}
@@ -215,7 +216,7 @@ jobs:
         with:
           name: ${{ steps.prior_ledger_run.outputs.prior_artifact_name }}
           run-id: ${{ steps.prior_ledger_run.outputs.prior_run_id }}
-          github-token: ${{ steps.app_token.outputs.token }}
+          github-token: ${{ steps.github_token.outputs.token }}
           path: ${{ runner.temp }}/lgtm-prior-artifact
 
       - name: Prepare prior ledger
@@ -223,7 +224,7 @@ jobs:
         env:
           PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
           PRIOR_LEDGER_JSON: ${{ runner.temp }}/lgtm-prior-ledger.json
-        run: node workflow-src/scripts/prepare-prior-ledger.mjs
+        run: uv run --project workflow-src python -m scripts.prepare_prior_ledger
 
       - name: Run reviewers
         env:
@@ -234,63 +235,20 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
           RESOLVED_MODEL: ${{ steps.config.outputs.resolved_model }}
-          RESOLVED_EFFORT: ${{ steps.config.outputs.resolved_effort }}
           SCHEMA_FILE: ${{ github.workspace }}/workflow-src/schemas/reviewer-output.schema.json
           PROMPTS_DIR: ${{ runner.temp }}/lgtm-prompts
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
           REVIEWER_TIMEOUT_MINUTES: ${{ inputs.reviewer_timeout_minutes }}
           WORKSPACE_DIR: ${{ github.workspace }}
-          CODEX_BIN: ${{ github.workspace }}/workflow-src/node_modules/.bin/codex
-          CODEX_PROXY_BIN: ${{ github.workspace }}/workflow-src/node_modules/.bin/codex-responses-api-proxy
-        run: |
-          set -euo pipefail
-
-          CODEX_HOME_DIR="$RUNNER_TEMP/codex-home"
-          SERVER_INFO_FILE="$RUNNER_TEMP/codex-proxy.json"
-          PROXY_LOG_FILE="$RUNNER_TEMP/codex-proxy.log"
-          mkdir -p "$CODEX_HOME_DIR"
-
-          printenv OPENAI_API_KEY | env -u OPENAI_API_KEY "$CODEX_PROXY_BIN" \
-            --http-shutdown \
-            --server-info "$SERVER_INFO_FILE" >"$PROXY_LOG_FILE" 2>&1 &
-
-          for _ in {1..20}; do
-            if [[ -s "$SERVER_INFO_FILE" ]]; then
-              break
-            fi
-            sleep 1
-          done
-
-          if [[ ! -s "$SERVER_INFO_FILE" ]]; then
-            echo "codex-responses-api-proxy did not write server info" >&2
-            cat "$PROXY_LOG_FILE" >&2 || true
-            exit 1
-          fi
-
-          proxy_port="$(
-            node -e 'const fs=require("node:fs"); const info=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if (!info || !Number.isInteger(info.port)) process.exit(1); process.stdout.write(String(info.port));' \
-              "$SERVER_INFO_FILE"
-          )"
-
-          cat > "$CODEX_HOME_DIR/config.toml" <<EOF
-          # Added by LGTM workflow.
-          model_provider = "codex-action-responses-proxy"
-
-          [model_providers.codex-action-responses-proxy]
-          name = "Codex Action Responses Proxy"
-          base_url = "http://127.0.0.1:${proxy_port}/v1"
-          wire_api = "responses"
-          EOF
-
-          env -u OPENAI_API_KEY CODEX_HOME="$CODEX_HOME_DIR" node workflow-src/scripts/run-reviewers-parallel.mjs
+        run: uv run --project workflow-src python -m scripts.run_reviewers_parallel
 
       - name: Compute pass/fail consensus
         id: consensus
         env:
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
-          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           SHA: ${{ steps.pr.outputs.head_sha }}
@@ -300,19 +258,19 @@ jobs:
           LEDGER_PATH: ${{ runner.temp }}/lgtm-findings-ledger.json
           PUBLISH_INLINE_COMMENTS: ${{ inputs.publish_inline_comments }}
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
-        run: node workflow-src/scripts/consensus.mjs
+        run: uv run --project workflow-src python -m scripts.consensus
 
       - name: Auto-approve PR when no findings
         if: ${{ always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason == 'PASS_NO_FINDINGS' }}
         env:
-          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           SHA: ${{ steps.pr.outputs.head_sha }}
-        run: node workflow-src/scripts/approve-pr-when-clean.mjs
+        run: uv run --project workflow-src python -m scripts.approve_pr_when_clean
 
       - name: Persist consensus artifacts
-        if: ${{ always() }}
+        if: ${{ always() && steps.consensus.outputs.comment_path != '' && steps.consensus.outputs.ledger_path != '' }}
         env:
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
           CONSENSUS_REPORTS: ${{ steps.consensus.outputs.reports_json }}
@@ -321,7 +279,7 @@ jobs:
           REVIEWER_ERRORS_COUNT: ${{ steps.consensus.outputs.reviewer_errors_count }}
           COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
           LEDGER_PATH: ${{ steps.consensus.outputs.ledger_path }}
-        run: node workflow-src/scripts/persist-consensus-artifacts.mjs
+        run: uv run --project workflow-src python -m scripts.persist_consensus_artifacts
 
       - name: Upload LGTM artifact
         if: ${{ always() }}
@@ -332,16 +290,17 @@ jobs:
           retention-days: 14
 
       - name: Upsert sticky PR comment
-        if: ${{ always() && inputs.publish_comment }}
+        if: ${{ always() && inputs.publish_comment && steps.consensus.outputs.comment_path != '' }}
         env:
-          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
-        run: node workflow-src/scripts/upsert-pr-comment.mjs
+          STICKY_COMMENT_TRUSTED_OWNERS: ${{ inputs.sticky_comment_trusted_owners }}
+        run: uv run --project workflow-src python -m scripts.upsert_pr_comment
 
       - name: Enforce LGTM gate
-        if: ${{ always() && inputs.enforce_gate }}
+        if: ${{ always() && inputs.enforce_gate && steps.consensus.outputs.outcome != '' }}
         run: |
           if [[ "${{ steps.consensus.outputs.outcome }}" != "PASS" ]]; then
             echo "LGTM outcome is ${{ steps.consensus.outputs.outcome }}; failing workflow by policy."

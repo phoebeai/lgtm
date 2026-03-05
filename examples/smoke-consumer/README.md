@@ -20,10 +20,11 @@ Files:
 
 Token permissions:
 
-- LGTM uses a GitHub App installation token minted inside the reusable workflow.
-- Pass App secrets in the caller:
-  - `github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}`
-  - `github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}`
+- LGTM mints the GitHub App installation token inside the reusable workflow job.
+- Pass App credentials to LGTM:
+  - `lgtm_github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}`
+  - `lgtm_github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}`
+- For same-repo trusted callers, you can use `secrets: inherit`.
 - Install the App on your repository with:
   - `Pull requests: Read and write`
   - `Contents: Read`

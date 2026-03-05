@@ -23,7 +23,6 @@ Reusable GitHub Actions workflow for blocker-first pull request review with mult
 version: 1
 defaults:
   model: gpt-5.3-codex
-  effort: xhigh
 reviewers:
   - id: security
     display_name: Security
@@ -68,8 +67,8 @@ jobs:
       auto_approve_no_findings: true
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-      github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}
-      github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}
+      lgtm_github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}
+      lgtm_github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}
 ```
 
 6. Open or update a PR.
@@ -84,7 +83,6 @@ Top-level fields:
 
 - `version` (`1`, required)
 - `defaults.model` (optional string)
-- `defaults.effort` (optional string)
 - `reviewers` (required, non-empty array)
 
 Reviewer fields:
@@ -102,7 +100,7 @@ Inputs exposed by `.github/workflows/lgtm.yml`:
 - `workflow_source_repository` (default `phoebeai/lgtm`)
 - `workflow_source_ref` (default `v1`)
 - `config_path` (default `.github/lgtm.yml`)
-- `model`, `effort` (optional global overrides)
+- `model` (optional global override)
 - `publish_comment` (default `true`)
 - `publish_inline_comments` (default `true`)
 - `enforce_gate` (default `true`)
@@ -110,18 +108,19 @@ Inputs exposed by `.github/workflows/lgtm.yml`:
 - `auto_approve_no_findings` (default `false`)
 - `pull_request_number` (used by `workflow_dispatch` callers)
 
-Required secrets:
+Secrets:
 
 - `openai_api_key`
-- `github_app_id`
-- `github_app_private_key`
+- `lgtm_github_app_id`
+- `lgtm_github_app_private_key`
 
 GitHub auth:
 
-- LGTM mints a GitHub App installation token inside the reusable workflow.
-- Configure App secrets in the caller as:
-  - `github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}`
-  - `github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}`
+- LGTM mints a short-lived GitHub App installation token inside the reusable workflow job.
+- Caller passes App credentials as secrets:
+  - `lgtm_github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}`
+  - `lgtm_github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}`
+- For same-repo trusted callers, you can use `secrets: inherit` instead of explicit mapping.
 - Install the GitHub App on the repository with at least:
   - `Pull requests: Read and write`
   - `Contents: Read`
@@ -143,7 +142,7 @@ GitHub auth:
 
 ## Fork PR Behavior
 
-On pull requests from forks, repository secrets are typically unavailable. If `OPENAI_API_KEY` or GitHub App secrets are unavailable, this workflow cannot run reviewer execution. Recommended patterns:
+On pull requests from forks, repository secrets are typically unavailable. If `OPENAI_API_KEY` or the caller's GitHub App minting secrets are unavailable, this workflow cannot run reviewer execution. Recommended patterns:
 
 - run this workflow only for same-repo PRs, or
 - use an internal triage workflow for fork contributions.
@@ -162,13 +161,16 @@ Use a tagged release ref in consumers (for example `@v1`). Avoid `@main` in prod
 
 Requirements:
 
-- Node.js `>=20`
+- Python `>=3.12`
+- `uv`
 
 Run tests:
 
 ```bash
-npm ci --ignore-scripts
-npm test
+uv sync --all-groups
+uv run pytest
+uv run ruff check scripts tests
+uv run ty check scripts tests
 ```
 
 ## Contributing and Security
