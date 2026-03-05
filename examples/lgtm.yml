@@ -1,7 +1,6 @@
 version: 1
 defaults:
   model: gpt-5.3-codex
-  effort: xhigh
 reviewers:
   - id: security
     display_name: Security

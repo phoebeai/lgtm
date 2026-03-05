@@ -55,7 +55,6 @@ value ReviewConfig {
 
 value ConfigDefaults {
     model: String?
-    effort: String?
 }
 
 -- Finding IDs use a prefix derived from the reviewer id plus a
@@ -143,7 +142,7 @@ entity ReviewRun {
 ------------------------------------------------------------
 
 rule PrepareConfig {
-    when: PRReviewRequested(pull_request, config_path, model?, effort?)
+    when: PRReviewRequested(pull_request, config_path, model?)
 
     requires: is_safe_relative_path(config_path)
     requires: git_blob_exists(pull_request.base_sha, config_path)
@@ -158,16 +157,13 @@ rule PrepareConfig {
             is_safe_relative_path(r.prompt_file)
             and git_blob_exists(pull_request.base_sha, r.prompt_file)
 
-    -- Model/effort resolution: input overrides config defaults, which
-    -- override a built-in fallback. At least one source must provide
-    -- a value for each.
+    -- Model resolution: input overrides config defaults, which
+    -- override a built-in fallback.
     let resolved_model = model ?? config.defaults?.model ?? fallback_model
-    let resolved_effort = effort ?? config.defaults?.effort ?? fallback_effort
 
     requires: resolved_model != null
-    requires: resolved_effort != null
 
-    ensures: ConfigLoaded(config, pull_request, resolved_model, resolved_effort)
+    ensures: ConfigLoaded(config, pull_request, resolved_model)
 }
 
 ------------------------------------------------------------
@@ -178,14 +174,14 @@ rule PrepareConfig {
 -- If missing/unreadable, fallback to empty ledger.
 
 rule RestorePriorLedger {
-    when: ConfigLoaded(config, pull_request, resolved_model, resolved_effort)
+    when: ConfigLoaded(config, pull_request, resolved_model)
 
     let prior_ledger = actions_restore_prior_lgtm_ledger(
         repository: pull_request.repository,
         pull_request_number: pull_request.number
     )
 
-    ensures: PriorLedgerReady(config, pull_request, prior_ledger, resolved_model, resolved_effort)
+    ensures: PriorLedgerReady(config, pull_request, prior_ledger, resolved_model)
 }
 
 ------------------------------------------------------------
@@ -204,7 +200,7 @@ rule RestorePriorLedger {
 --   - Per-reviewer timeout (default 10 minutes)
 
 rule RunReviewers {
-    when: PriorLedgerReady(config, pull_request, prior_ledger, resolved_model, resolved_effort)
+    when: PriorLedgerReady(config, pull_request, prior_ledger, resolved_model)
 
     let changed_files = git_diff_file_names(pull_request.base_sha, pull_request.head_sha)
 

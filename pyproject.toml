@@ -1,0 +1,33 @@
+[project]
+name = "phoebe-lgtm"
+version = "0.2.0"
+description = "Reusable GitHub Actions workflow for blocker-first PR reviews"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.28.1",
+  "jsonschema>=4.25.0",
+  "openai>=2.24.0",
+  "pathspec>=0.12.1",
+  "pyyaml>=6.0.2",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+  "ruff>=0.12.0",
+  "ty>=0.0.20",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "UP040"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
+testpaths = ["tests"]
