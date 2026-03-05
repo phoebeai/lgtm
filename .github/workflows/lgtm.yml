@@ -82,6 +82,8 @@ jobs:
   lgtm:
     name: LGTM
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}/workflow-src
     steps:
       - name: Resolve workflow source checkout target
         id: workflow_source

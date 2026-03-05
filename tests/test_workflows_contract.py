@@ -7,6 +7,7 @@ def test_lgtm_workflow_uses_uv_and_python_scripts() -> None:
     assert "actions/create-github-app-token@v1" in body
     assert "uv run --project workflow-src python -m scripts.load_trusted_review_config" in body
     assert "python -m scripts.run_reviewers_parallel" in body
+    assert "PYTHONPATH: ${{ github.workspace }}/workflow-src" in body
     assert "node workflow-src/scripts" not in body
     assert "INPUT_EFFORT" not in body
     assert "RESOLVED_EFFORT" not in body
