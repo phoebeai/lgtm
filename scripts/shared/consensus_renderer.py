@@ -39,11 +39,10 @@ def _push_findings_section(
     entries: list[PresentationEntry],
     labels: dict[str, str],
 ) -> None:
-    lines.append(f"### {title}")
     if not entries:
-        lines.append("- None")
-        lines.append("")
         return
+
+    lines.append(f"### {title}")
 
     for entry in entries:
         lines.append(_format_finding(entry, labels))
@@ -108,10 +107,15 @@ def render_consensus_comment(
             reviewer_errors_count=len(reviewer_errors),
         )
     )
-    lines.append("")
 
-    _push_reviewer_errors_section(lines, reviewer_errors)
-    _push_findings_section(lines, "Open Findings", open_entries, labels_by_reviewer_id)
-    _push_findings_section(lines, "Resolved Findings", resolved_entries, labels_by_reviewer_id)
+    has_details_sections = bool(reviewer_errors or open_entries or resolved_entries)
+    if has_details_sections:
+        lines.append("")
+        _push_reviewer_errors_section(lines, reviewer_errors)
+        _push_findings_section(lines, "Open Findings", open_entries, labels_by_reviewer_id)
+        _push_findings_section(lines, "Resolved Findings", resolved_entries, labels_by_reviewer_id)
+
+    while lines and lines[-1] == "":
+        lines.pop()
 
     return "\n".join(lines)
