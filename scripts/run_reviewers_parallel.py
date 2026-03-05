@@ -89,10 +89,23 @@ def resolve_timeout_ms(*, reviewer_timeout_minutes: str, reviewer_timeout_ms: st
     return explicit_timeout_ms if explicit_timeout_ms > 0 else fallback_timeout_ms
 
 
+def load_output_schema(schema_path: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Invalid reviewer output schema at {schema_path}: {error}") from error
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Invalid reviewer output schema at {schema_path}: root must be an object")
+
+    return parsed
+
+
 def default_run_reviewer_with_openai(
     *,
     model: str,
     prompt_path: str,
+    output_schema: dict[str, object],
     timeout_ms: int,
 ) -> ReviewExecutionResult:
     prompt = Path(prompt_path).read_text(encoding="utf-8")
@@ -104,6 +117,14 @@ def default_run_reviewer_with_openai(
         response = client.responses.create(
             model=model,
             input=prompt,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "reviewer_output",
+                    "schema": output_schema,
+                    "strict": True,
+                }
+            },
             timeout=timeout_seconds,
         )
         raw_output = response.output_text or ""
@@ -179,9 +200,11 @@ def run_single_reviewer(
         prompt_skip_reason = prepared.skip_reason
 
         if prepared.reviewer_active:
+            output_schema = load_output_schema(prepared.schema_path)
             review_result = default_run_reviewer_with_openai(
                 model=resolved_model,
                 prompt_path=prepared.prompt_path,
+                output_schema=output_schema,
                 timeout_ms=timeout_ms,
             )
             raw_output = review_result.raw_output

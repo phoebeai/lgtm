@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 
 from scripts.shared.github_output import write_github_output
 from scripts.shared.reviewer_core import (
@@ -14,50 +13,7 @@ from scripts.shared.reviewer_core import (
     normalize_reviewer,
     normalize_structured_reviewer_payload,
 )
-from scripts.shared.types import JSONObject, ReviewerReport
-
-
-def extract_candidates(text: str) -> list[str]:
-    trimmed = text.strip()
-    if not trimmed:
-        return []
-
-    candidates = [trimmed]
-
-    fence_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
-    for match in fence_pattern.finditer(trimmed):
-        candidate = match.group(1).strip()
-        if candidate:
-            candidates.append(candidate)
-
-    first_brace = trimmed.find("{")
-    last_brace = trimmed.rfind("}")
-    if first_brace >= 0 and last_brace > first_brace:
-        candidates.append(trimmed[first_brace : last_brace + 1])
-
-    for line in trimmed.splitlines():
-        candidate = line.strip()
-        if candidate.startswith("{") and candidate.endswith("}"):
-            candidates.append(candidate)
-
-    deduped: list[str] = []
-    for candidate in candidates:
-        if candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
-
-
-def parse_object_candidate(text: str) -> JSONObject | None:
-    for candidate in extract_candidates(text):
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-
-        if isinstance(parsed, dict):
-            return parsed
-
-    return None
+from scripts.shared.types import ReviewerReport
 
 
 def process_reviewer_output(
@@ -134,15 +90,9 @@ def process_reviewer_output(
         return make_error_payload(expected_reviewer, reasons)
 
     try:
-        try:
-            parsed_payload = json.loads(normalized_raw_output)
-            if not isinstance(parsed_payload, dict):
-                raise ValueError("payload is not a JSON object")
-        except (json.JSONDecodeError, ValueError):
-            parsed_candidate = parse_object_candidate(normalized_raw_output)
-            if parsed_candidate is None:
-                raise
-            parsed_payload = parsed_candidate
+        parsed_payload = json.loads(normalized_raw_output)
+        if not isinstance(parsed_payload, dict):
+            raise ValueError("payload is not a JSON object")
 
         return normalize_structured_reviewer_payload(parsed_payload, expected_reviewer)
     except Exception as error:
