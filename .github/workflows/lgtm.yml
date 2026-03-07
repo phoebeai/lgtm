@@ -271,6 +271,14 @@ jobs:
           SHA: ${{ steps.pr.outputs.head_sha }}
         run: uv run --project workflow-src python -m scripts.approve_pr_when_clean
 
+      - name: Dismiss prior approval when findings exist
+        if: ${{ always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason != '' && steps.consensus.outputs.outcome_reason != 'PASS_NO_FINDINGS' }}
+        env:
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: uv run --project workflow-src python -m scripts.dismiss_approval
+
       - name: Persist consensus artifacts
         if: ${{ always() && steps.consensus.outputs.comment_path != '' && steps.consensus.outputs.ledger_path != '' }}
         env:
