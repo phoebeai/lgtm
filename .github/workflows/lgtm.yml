@@ -262,6 +262,15 @@ jobs:
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
         run: uv run --project workflow-src python -m scripts.consensus
 
+      - name: Dismiss prior LGTM bot approvals when failing
+        if: ${{ always() && steps.consensus.outputs.outcome != '' && steps.consensus.outputs.outcome != 'PASS' }}
+        env:
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SHA: ${{ steps.pr.outputs.head_sha }}
+        run: uv run --project workflow-src python -m scripts.dismiss_bot_approvals_on_failure
+
       - name: Auto-approve PR when no findings
         if: ${{ always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason == 'PASS_NO_FINDINGS' }}
         env:

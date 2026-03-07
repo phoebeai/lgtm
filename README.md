@@ -10,6 +10,7 @@ Reusable GitHub Actions workflow for blocker-first pull request review with mult
 - Sticky PR summary comment with open/resolved sections and optional inline findings.
 - PASS/FAIL gate based on reviewer errors + open findings.
 - Optional auto-approval when no findings are open.
+- Automatic dismissal of prior LGTM bot approvals when a later run fails.
 
 ## Quick Start
 
