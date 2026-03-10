@@ -7,6 +7,10 @@ description: Use to consume LGTM workflow output on the current pull request, re
 
 Use this skill to turn LGTM output into concrete patches quickly and repeatably.
 
+## Available Scripts
+
+- **scripts/fetch_lgtm_context.sh** - Fetches the latest completed LGTM run for the current branch.
+
 ## Workflow
 
 1. Establish PR + LGTM context.
@@ -15,7 +19,7 @@ Use this skill to turn LGTM output into concrete patches quickly and repeatably.
 - From the repo root, run:
 
 ```bash
-bash .agents/skills/lgtm/scripts/fetch_lgtm_context.sh
+bash scripts/fetch_lgtm_context.sh
 ```
 
 - This downloads the latest completed LGTM artifact for the current branch and prints:
@@ -55,13 +59,13 @@ bash .agents/skills/lgtm/scripts/fetch_lgtm_context.sh
 Fetch latest completed LGTM run for current branch:
 
 ```bash
-bash .agents/skills/lgtm/scripts/fetch_lgtm_context.sh
+bash scripts/fetch_lgtm_context.sh
 ```
 
 Fetch a specific run id:
 
 ```bash
-bash .agents/skills/lgtm/scripts/fetch_lgtm_context.sh -r 22280357273
+bash scripts/fetch_lgtm_context.sh -r 22280357273
 ```
 
 Read merged JSON in full:
@@ -90,4 +94,4 @@ jq -r '
 
 For additional `gh`/`jq` snippets, read:
 
-- `.agents/skills/lgtm/references/commands.md`
+- `references/commands.md`
