@@ -40,6 +40,11 @@ def normalize_login(value: str | None) -> str:
     return normalized
 
 
+def parse_app_slug(value: str | None) -> set[str]:
+    tokens = normalize_text(value).replace(",", " ").split()
+    return {normalize_login(token) for token in tokens if normalize_login(token)}
+
+
 def parse_repository(repo: str) -> tuple[str, str]:
     parts = repo.split("/")
     if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -74,30 +79,6 @@ def list_pull_reviews(*, api_base: str, pr_number: int, token: str) -> list[JSON
     )
 
 
-def resolve_bot_logins(*, api_base: str, token: str, request: RequestFunc) -> set[str]:
-    logins: set[str] = set()
-
-    try:
-        installation = request(method="GET", url=f"{api_base}/installation", token=token)
-        if isinstance(installation, dict):
-            app_slug = installation.get("app_slug")
-            if isinstance(app_slug, str) and normalize_text(app_slug):
-                logins.add(normalize_login(app_slug))
-    except Exception:
-        pass
-
-    try:
-        viewer = request(method="GET", url="https://api.github.com/user", token=token)
-        if isinstance(viewer, dict):
-            login = viewer.get("login")
-            if isinstance(login, str) and normalize_text(login):
-                logins.add(normalize_login(login))
-    except Exception:
-        pass
-
-    return logins
-
-
 def dismiss_bot_approvals_on_failure(
     *,
     token: str,
@@ -105,6 +86,7 @@ def dismiss_bot_approvals_on_failure(
     pr_number: str,
     expected_head_sha: str,
     message: str,
+    app_slug: str = "",
     request: RequestFunc = github_request,
     list_reviews: ListReviewsFunc = list_pull_reviews,
 ) -> int:
@@ -113,9 +95,12 @@ def dismiss_bot_approvals_on_failure(
     normalized_expected_head_sha = normalize_text(expected_head_sha)
     normalized_pr_number = parse_pull_number(pr_number)
     normalized_message = normalize_text(message) or "LGTM no longer passes for the current PR head."
+    normalized_app_slug = parse_app_slug(app_slug)
 
     if not normalized_token:
         raise ValueError("GITHUB_TOKEN is required")
+    if not normalized_app_slug:
+        raise ValueError("APP_SLUG is required")
 
     owner, name = parse_repository(normalized_repo)
     api_base = f"https://api.github.com/repos/{owner}/{name}"
@@ -142,13 +127,6 @@ def dismiss_bot_approvals_on_failure(
         )
         return 0
 
-    bot_logins = resolve_bot_logins(api_base=api_base, token=normalized_token, request=request)
-    if not bot_logins:
-        sys.stderr.write(
-            "[dismiss-bot-approvals-on-failure] skipped: unable to resolve bot login for this token\n"
-        )
-        return 0
-
     reviews = list_reviews(api_base=api_base, pr_number=normalized_pr_number, token=normalized_token)
     approval_review_ids: list[int] = []
     for review in reviews:
@@ -165,7 +143,7 @@ def dismiss_bot_approvals_on_failure(
             continue
         if state.upper() != "APPROVED":
             continue
-        if normalize_login(user_login) not in bot_logins:
+        if normalize_login(user_login) not in normalized_app_slug:
             continue
         approval_review_ids.append(review_id)
 
@@ -202,6 +180,7 @@ def main() -> None:
             "DISMISS_APPROVAL_MESSAGE",
             "Dismissing prior LGTM approval because the latest run reported reviewer errors or open findings.",
         ),
+        app_slug=os.getenv("APP_SLUG", ""),
     )
     print(f"dismissed_count={dismissed_count}")
 
