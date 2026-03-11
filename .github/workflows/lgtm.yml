@@ -269,6 +269,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           SHA: ${{ steps.pr.outputs.head_sha }}
+          APP_SLUG: ${{ steps.github_token.outputs.app-slug }}
         run: uv run --project workflow-src python -m scripts.dismiss_bot_approvals_on_failure
 
       - name: Auto-approve PR when no findings
