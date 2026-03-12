@@ -28,7 +28,11 @@ def compute_consensus(
             continue
 
         if report["run_state"] == "error":
-            reviewer_errors.append(f"{reviewer['id']}: reviewer execution/output error")
+            errors = report.get("errors") or []
+            first_error = errors[0].strip() if errors and isinstance(errors[0], str) else ""
+            reviewer_errors.append(
+                f"{reviewer['id']}: {first_error or 'reviewer execution/output error'}"
+            )
             continue
 
         if report["run_state"] != "completed":

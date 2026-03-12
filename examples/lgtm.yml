@@ -1,6 +1,7 @@
 version: 1
 defaults:
   model: gpt-5.3-codex
+  max_changed_lines: 1000
 reviewers:
   - id: security
     display_name: Security
