@@ -72,6 +72,23 @@ def strip_legacy_defaults_effort(raw_config: dict[str, JSONValue]) -> dict[str, 
     return {**raw_config, "defaults": normalized_defaults}
 
 
+def strip_legacy_reviewer_max_changed_lines(raw_config: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    raw_reviewers = raw_config.get("reviewers")
+    if not isinstance(raw_reviewers, list):
+        return raw_config
+
+    normalized_reviewers: list[JSONValue] = []
+    for raw_reviewer in raw_reviewers:
+        if not isinstance(raw_reviewer, dict):
+            normalized_reviewers.append(raw_reviewer)
+            continue
+
+        reviewer = {key: value for key, value in raw_reviewer.items() if key != "max_changed_lines"}
+        normalized_reviewers.append(reviewer)
+
+    return {**raw_config, "reviewers": normalized_reviewers}
+
+
 def load_config_schema() -> dict[str, JSONValue]:
     schema_path = Path(__file__).resolve().parent.parent / "schemas" / "lgtm-config.schema.json"
     try:
@@ -149,7 +166,7 @@ def ensure_safe_relative_path(value: JSONValue, context: str) -> str:
     return normalized
 
 
-def normalize_reviewers(raw_reviewers: JSONValue, *, default_max_changed_lines: int) -> list[ReviewerConfig]:
+def normalize_reviewers(raw_reviewers: JSONValue) -> list[ReviewerConfig]:
     if not isinstance(raw_reviewers, list):
         raise ValueError("reviewers must be an array")
     if not raw_reviewers:
@@ -165,7 +182,7 @@ def normalize_reviewers(raw_reviewers: JSONValue, *, default_max_changed_lines: 
 
         assert_allowed_keys(
             raw_reviewer,
-            {"id", "display_name", "prompt_file", "scope", "paths", "max_changed_lines"},
+            {"id", "display_name", "prompt_file", "scope", "paths"},
             label,
         )
 
@@ -188,11 +205,6 @@ def normalize_reviewers(raw_reviewers: JSONValue, *, default_max_changed_lines: 
             for path_index, path_entry in enumerate(raw_paths):
                 paths.append(ensure_safe_relative_path(path_entry, f"{label}.paths[{path_index}]"))
 
-        reviewer_max_changed_lines = normalize_optional_positive_int(
-            raw_reviewer.get("max_changed_lines"),
-            f"{label}.max_changed_lines",
-        )
-
         reviewers.append(
             ReviewerConfig(
                 id=reviewer_id,
@@ -200,7 +212,6 @@ def normalize_reviewers(raw_reviewers: JSONValue, *, default_max_changed_lines: 
                 prompt_file=prompt_file,
                 scope=scope,
                 paths_json=json.dumps(paths),
-                max_changed_lines=reviewer_max_changed_lines or default_max_changed_lines,
             )
         )
 
@@ -213,7 +224,7 @@ def normalize_config(raw_config: dict[str, JSONValue]) -> dict[str, JSONValue]:
     if raw_config.get("version") != 1:
         raise ValueError("config.version must be exactly 1")
 
-    defaults: dict[str, JSONValue] = {}
+    defaults: dict[str, JSONValue]
     raw_defaults = raw_config.get("defaults")
     if raw_defaults is not None:
         if not isinstance(raw_defaults, dict):
@@ -233,11 +244,9 @@ def normalize_config(raw_config: dict[str, JSONValue]) -> dict[str, JSONValue]:
         }
     else:
         default_max_changed_lines = DEFAULT_MAX_CHANGED_LINES
+        defaults = {"model": "", "max_changed_lines": default_max_changed_lines}
 
-    reviewers = normalize_reviewers(
-        raw_config.get("reviewers"),
-        default_max_changed_lines=default_max_changed_lines,
-    )
+    reviewers = normalize_reviewers(raw_config.get("reviewers"))
 
     return {
         "version": 1,
@@ -276,7 +285,7 @@ def load_trusted_review_config(
     input_model: str,
     fallback_model: str,
     run_git: GitRunner = default_run_git,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     normalized_base_sha = require_env("BASE_SHA", base_sha)
     normalized_head_sha = require_env("HEAD_SHA", head_sha)
     normalized_config_rel = ensure_safe_relative_path(config_rel, "CONFIG_REL")
@@ -299,6 +308,7 @@ def load_trusted_review_config(
     parsed = parse_yaml_or_json(raw_config, f"{normalized_base_sha}:{normalized_config_rel}")
     parsed = strip_legacy_reviewer_required(parsed)
     parsed = strip_legacy_defaults_effort(parsed)
+    parsed = strip_legacy_reviewer_max_changed_lines(parsed)
     validate_config_against_schema(parsed, load_config_schema(), f"{normalized_base_sha}:{normalized_config_rel}")
     config = normalize_config(parsed)
 
@@ -318,6 +328,12 @@ def load_trusted_review_config(
     defaults = config.get("defaults")
     if not isinstance(defaults, dict):
         defaults = {}
+    max_changed_lines = normalize_optional_positive_int(
+        defaults.get("max_changed_lines"),
+        "defaults.max_changed_lines",
+    )
+    if max_changed_lines is None:
+        raise ValueError("defaults.max_changed_lines must be present after normalization")
 
     resolved_model = resolve_value_with_fallback(
         input_value=input_model,
@@ -327,11 +343,11 @@ def load_trusted_review_config(
     )
 
     reviewers_json = json.dumps(reviewers)
-    return reviewers_json, resolved_model
+    return reviewers_json, resolved_model, str(max_changed_lines)
 
 
 def main() -> None:
-    reviewers_json, resolved_model = load_trusted_review_config(
+    reviewers_json, resolved_model, max_changed_lines = load_trusted_review_config(
         base_sha=os.getenv("BASE_SHA", ""),
         head_sha=os.getenv("HEAD_SHA", ""),
         config_rel=os.getenv("CONFIG_REL", ""),
@@ -342,12 +358,14 @@ def main() -> None:
     output_path = os.getenv("GITHUB_OUTPUT")
     write_github_output("reviewers_json", reviewers_json, output_path)
     write_github_output("resolved_model", resolved_model, output_path)
+    write_github_output("max_changed_lines", max_changed_lines, output_path)
 
     print(
         json.dumps(
             {
                 "reviewer_count": len(json.loads(reviewers_json)),
                 "resolved_model": resolved_model,
+                "max_changed_lines": max_changed_lines,
             }
         )
     )

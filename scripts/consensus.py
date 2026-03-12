@@ -20,6 +20,8 @@ from scripts.shared.types import (
     ReviewerReport,
 )
 
+GLOBAL_ERRORS_FILENAME = "global-errors.json"
+
 
 def normalize_text(value: str | int | float | bool | None) -> str:
     return str("" if value is None else value).replace("\r\n", "\n").strip()
@@ -30,6 +32,30 @@ def read_report_input(reports_dir: str, reviewer_id: str) -> str:
     if not report_path.exists():
         return ""
     return report_path.read_text(encoding="utf-8")
+
+
+def read_global_errors(reports_dir: str) -> list[str]:
+    global_errors_path = Path(reports_dir) / GLOBAL_ERRORS_FILENAME
+    if not global_errors_path.exists():
+        return []
+
+    try:
+        parsed = json.loads(global_errors_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return [f"global reviewer preflight parse failure: {error}"]
+
+    if not isinstance(parsed, dict):
+        return ["global reviewer preflight parse failure: payload is not a JSON object"]
+
+    raw_errors = parsed.get("errors")
+    if not isinstance(raw_errors, list):
+        return ["global reviewer preflight parse failure: errors must be an array"]
+
+    errors = [normalize_text(entry) for entry in raw_errors if normalize_text(entry)]
+    if errors:
+        return errors
+
+    return ["global reviewer preflight parse failure: errors array must contain at least one string"]
 
 
 def ensure_parent_dir(file_path: str) -> None:
@@ -141,9 +167,10 @@ def run_consensus(
     labels_by_reviewer_id = {reviewer["id"]: reviewer["display_name"] for reviewer in reviewers}
 
     reports = read_reports_for_reviewers(reports_dir=normalized_reports_dir, reviewers=reviewers)
+    global_errors = read_global_errors(normalized_reports_dir)
 
     consensus = compute_consensus(reports, reviewers=reviewers)
-    reviewer_errors = consensus["reviewerErrors"]
+    reviewer_errors = [*global_errors, *consensus["reviewerErrors"]]
 
     prior_ledger = read_ledger_input(prior_ledger_json)
     can_query_github_threads = bool(normalize_text(token) and normalize_text(repo) and normalize_text(pr_number))

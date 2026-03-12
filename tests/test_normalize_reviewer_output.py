@@ -45,27 +45,3 @@ def test_process_reviewer_output_rejects_markdown_wrapped_json() -> None:
     assert payload["run_state"] == "error"
     assert payload["errors"]
     assert "invalid review output:" in payload["errors"][0]
-
-
-def test_process_reviewer_output_marks_oversized_scopes_as_errors() -> None:
-    payload = process_reviewer_output(
-        reviewer="security",
-        reviewer_active="true",
-        reviewer_has_inputs="true",
-        prompt_step_outcome="oversized",
-        prompt_step_conclusion="skipped",
-        prompt_skip_reason=(
-            "Scoped diff exceeds max_changed_lines (1101 > 1000). "
-            "Use manual review or break the change into smaller PRs."
-        ),
-        raw_output="",
-        step_outcome="",
-        step_conclusion="",
-        step_error="",
-    )
-
-    assert payload["run_state"] == "error"
-    assert payload["errors"] == [
-        "Scoped diff exceeds max_changed_lines (1101 > 1000). "
-        "Use manual review or break the change into smaller PRs."
-    ]

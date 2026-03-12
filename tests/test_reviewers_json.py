@@ -9,17 +9,16 @@ from scripts.shared.reviewers_json import (
 
 def test_parse_reviewers_for_runner() -> None:
     reviewers = parse_reviewers_for_runner(
-        '[{"id":"security","display_name":"Security","prompt_file":"a.md","scope":"risk","max_changed_lines":1000}]'
+        '[{"id":"security","display_name":"Security","prompt_file":"a.md","scope":"risk"}]'
     )
     assert reviewers[0]["id"] == "security"
     assert reviewers[0]["paths_json"] == "[]"
-    assert reviewers[0]["max_changed_lines"] == 1000
 
 
 def test_parse_reviewers_for_runner_rejects_duplicates() -> None:
     with pytest.raises(ValueError, match="Duplicate reviewer id"):
         parse_reviewers_for_runner(
-            '[{"id":"security","prompt_file":"a.md","scope":"risk","max_changed_lines":1000},{"id":"security","prompt_file":"b.md","scope":"risk","max_changed_lines":1000}]'
+            '[{"id":"security","prompt_file":"a.md","scope":"risk"},{"id":"security","prompt_file":"b.md","scope":"risk"}]'
         )
 
 

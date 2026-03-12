@@ -10,17 +10,11 @@ def test_compute_consensus_surfaces_reviewer_error_details() -> None:
                 "summary": "",
                 "resolved_finding_ids": [],
                 "new_findings": [],
-                "errors": [
-                    "Scoped diff exceeds max_changed_lines (1101 > 1000). "
-                    "Use manual review or break the change into smaller PRs."
-                ],
+                "errors": ["trusted reviewer input build failed"],
             }
         },
         reviewers=[{"id": "security", "display_name": "Security"}],
     )
 
     assert result["outcome"] == "FAIL"
-    assert result["reviewerErrors"] == [
-        "security: Scoped diff exceeds max_changed_lines (1101 > 1000). "
-        "Use manual review or break the change into smaller PRs."
-    ]
+    assert result["reviewerErrors"] == ["security: trusted reviewer input build failed"]

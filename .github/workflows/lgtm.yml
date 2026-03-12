@@ -237,6 +237,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
           RESOLVED_MODEL: ${{ steps.config.outputs.resolved_model }}
+          MAX_CHANGED_LINES: ${{ steps.config.outputs.max_changed_lines }}
           SCHEMA_FILE: ${{ github.workspace }}/workflow-src/schemas/reviewer-output.schema.json
           PROMPTS_DIR: ${{ runner.temp }}/lgtm-prompts
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports

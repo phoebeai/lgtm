@@ -5,6 +5,8 @@ from pathlib import Path
 
 from scripts.shared.reviewers_json import parse_reviewer_ids
 
+GLOBAL_ERRORS_FILENAME = "global-errors.json"
+
 
 def write_text_file(file_path: Path, value: str) -> None:
     file_path.write_text(f"{value}\n", encoding="utf-8")
@@ -50,6 +52,10 @@ def persist_consensus_artifacts(
         source_path = source_reports_dir / f"{reviewer_id}.json"
         target_path = target_dir / f"{reviewer_id}.json"
         copy_or_create_empty_file(source_path, target_path)
+
+    global_errors_path = source_reports_dir / GLOBAL_ERRORS_FILENAME
+    if global_errors_path.exists():
+        (target_dir / GLOBAL_ERRORS_FILENAME).write_bytes(global_errors_path.read_bytes())
 
     write_text_file(target_dir / "reports-merged.json", consensus_reports)
     write_text_file(target_dir / "outcome.txt", outcome)

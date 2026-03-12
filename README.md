@@ -94,10 +94,9 @@ Reviewer fields:
 - `display_name` (required)
 - `prompt_file` (required, relative path, no parent traversal)
 - `scope` (required)
-- `max_changed_lines` (optional integer override, defaults to `defaults.max_changed_lines`)
 - `paths` (optional array of glob patterns)
 
-Oversized reviewer scopes do not call the model. They fail the run and require manual review.
+If the full PR diff exceeds `defaults.max_changed_lines`, excluding files marked generated via `.gitattributes`, LGTM fails before any reviewer runs and requires manual review.
 
 ## Workflow Inputs
 
