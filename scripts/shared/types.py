@@ -14,6 +14,7 @@ class ReviewerConfig(TypedDict):
     prompt_file: str
     scope: str
     paths_json: str
+    max_changed_lines: int
 
 
 class ConsensusReviewer(TypedDict):

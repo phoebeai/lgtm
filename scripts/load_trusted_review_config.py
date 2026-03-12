@@ -20,6 +20,7 @@ from scripts.shared.types import JSONValue, ReviewerConfig
 
 REVIEWER_ID_PATTERN = re.compile(r"^[a-z0-9_]+$")
 UNSAFE_PATH_PATTERN = re.compile(r"[\u0000-\u001F\u007F-\u009F\u2028\u2029]")
+DEFAULT_MAX_CHANGED_LINES = 1000
 
 
 def parse_yaml_or_json(input_text: str, source_label: str) -> dict[str, JSONValue]:
@@ -123,6 +124,16 @@ def normalize_string(value: JSONValue, context: str) -> str:
     return normalized
 
 
+def normalize_optional_positive_int(value: JSONValue, context: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{context} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{context} must be greater than 0")
+    return value
+
+
 def ensure_safe_relative_path(value: JSONValue, context: str) -> str:
     normalized = normalize_string(value, context)
 
@@ -138,7 +149,7 @@ def ensure_safe_relative_path(value: JSONValue, context: str) -> str:
     return normalized
 
 
-def normalize_reviewers(raw_reviewers: JSONValue) -> list[ReviewerConfig]:
+def normalize_reviewers(raw_reviewers: JSONValue, *, default_max_changed_lines: int) -> list[ReviewerConfig]:
     if not isinstance(raw_reviewers, list):
         raise ValueError("reviewers must be an array")
     if not raw_reviewers:
@@ -152,7 +163,11 @@ def normalize_reviewers(raw_reviewers: JSONValue) -> list[ReviewerConfig]:
         if not isinstance(raw_reviewer, dict):
             raise ValueError(f"{label} must be an object")
 
-        assert_allowed_keys(raw_reviewer, {"id", "display_name", "prompt_file", "scope", "paths"}, label)
+        assert_allowed_keys(
+            raw_reviewer,
+            {"id", "display_name", "prompt_file", "scope", "paths", "max_changed_lines"},
+            label,
+        )
 
         reviewer_id = normalize_string(raw_reviewer.get("id"), f"{label}.id")
         if not REVIEWER_ID_PATTERN.fullmatch(reviewer_id):
@@ -173,6 +188,11 @@ def normalize_reviewers(raw_reviewers: JSONValue) -> list[ReviewerConfig]:
             for path_index, path_entry in enumerate(raw_paths):
                 paths.append(ensure_safe_relative_path(path_entry, f"{label}.paths[{path_index}]"))
 
+        reviewer_max_changed_lines = normalize_optional_positive_int(
+            raw_reviewer.get("max_changed_lines"),
+            f"{label}.max_changed_lines",
+        )
+
         reviewers.append(
             ReviewerConfig(
                 id=reviewer_id,
@@ -180,6 +200,7 @@ def normalize_reviewers(raw_reviewers: JSONValue) -> list[ReviewerConfig]:
                 prompt_file=prompt_file,
                 scope=scope,
                 paths_json=json.dumps(paths),
+                max_changed_lines=reviewer_max_changed_lines or default_max_changed_lines,
             )
         )
 
@@ -192,20 +213,31 @@ def normalize_config(raw_config: dict[str, JSONValue]) -> dict[str, JSONValue]:
     if raw_config.get("version") != 1:
         raise ValueError("config.version must be exactly 1")
 
-    defaults: dict[str, str] = {}
+    defaults: dict[str, JSONValue] = {}
     raw_defaults = raw_config.get("defaults")
     if raw_defaults is not None:
         if not isinstance(raw_defaults, dict):
             raise ValueError("defaults must be an object when provided")
-        assert_allowed_keys(raw_defaults, {"model"}, "defaults")
+        assert_allowed_keys(raw_defaults, {"model", "max_changed_lines"}, "defaults")
 
         model_value = raw_defaults.get("model")
+        max_changed_lines_value = normalize_optional_positive_int(
+            raw_defaults.get("max_changed_lines"),
+            "defaults.max_changed_lines",
+        )
+        default_max_changed_lines = max_changed_lines_value or DEFAULT_MAX_CHANGED_LINES
 
         defaults = {
             "model": normalize_string(model_value, "defaults.model") if model_value is not None else "",
+            "max_changed_lines": default_max_changed_lines,
         }
+    else:
+        default_max_changed_lines = DEFAULT_MAX_CHANGED_LINES
 
-    reviewers = normalize_reviewers(raw_config.get("reviewers"))
+    reviewers = normalize_reviewers(
+        raw_config.get("reviewers"),
+        default_max_changed_lines=default_max_changed_lines,
+    )
 
     return {
         "version": 1,

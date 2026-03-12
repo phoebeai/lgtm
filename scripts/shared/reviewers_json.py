@@ -9,7 +9,7 @@ from .types import ConsensusReviewer, ReviewerConfig
 
 @dataclass(frozen=True)
 class _ReviewerRow:
-    entry: dict[str, str | list[str]]
+    entry: dict[str, str | int | list[str]]
     reviewer_id: str
     index: int
 
@@ -33,9 +33,13 @@ def _parse_reviewer_entries(reviewers_json: str | None, require_non_empty: bool 
         if not isinstance(entry, dict):
             raise ValueError(f"REVIEWERS_JSON[{index}] must be an object")
 
-        typed_entry: dict[str, str | list[str]] = {}
+        typed_entry: dict[str, str | int | list[str]] = {}
         for key, value in entry.items():
-            if isinstance(value, str) or (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            if (
+                isinstance(value, str)
+                or (isinstance(value, int) and not isinstance(value, bool))
+                or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+            ):
                 typed_entry[key] = value
 
         reviewer_id = str(typed_entry.get("id", "")).strip()
@@ -73,6 +77,12 @@ def parse_reviewers_for_runner(reviewers_json: str | None) -> list[ReviewerConfi
             paths = row.entry.get("paths")
             paths_json = json.dumps(paths) if isinstance(paths, list) else "[]"
 
+        max_changed_lines_value = row.entry.get("max_changed_lines")
+        if not isinstance(max_changed_lines_value, int) or isinstance(max_changed_lines_value, bool):
+            raise ValueError(f"{label}.max_changed_lines must be an integer")
+        if max_changed_lines_value <= 0:
+            raise ValueError(f"{label}.max_changed_lines must be greater than 0")
+
         reviewers.append(
             ReviewerConfig(
                 id=row.reviewer_id,
@@ -80,6 +90,7 @@ def parse_reviewers_for_runner(reviewers_json: str | None) -> list[ReviewerConfi
                 prompt_file=prompt_file,
                 scope=scope,
                 paths_json=paths_json,
+                max_changed_lines=max_changed_lines_value,
             )
         )
 

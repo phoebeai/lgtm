@@ -24,6 +24,7 @@ Reusable GitHub Actions workflow for blocker-first pull request review with mult
 version: 1
 defaults:
   model: gpt-5.3-codex
+  max_changed_lines: 1000
 reviewers:
   - id: security
     display_name: Security
@@ -84,6 +85,7 @@ Top-level fields:
 
 - `version` (`1`, required)
 - `defaults.model` (optional string)
+- `defaults.max_changed_lines` (optional integer, default `1000`)
 - `reviewers` (required, non-empty array)
 
 Reviewer fields:
@@ -92,7 +94,10 @@ Reviewer fields:
 - `display_name` (required)
 - `prompt_file` (required, relative path, no parent traversal)
 - `scope` (required)
+- `max_changed_lines` (optional integer override, defaults to `defaults.max_changed_lines`)
 - `paths` (optional array of glob patterns)
+
+Oversized reviewer scopes do not call the model. They fail the run and require manual review.
 
 ## Workflow Inputs
 

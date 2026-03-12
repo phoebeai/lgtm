@@ -30,10 +30,44 @@ class PreparedReviewerInputs:
     skip_reason: str
 
 
+class ReviewScopeTooLargeError(ValueError):
+    pass
+
+
 def read_changed_files(base_sha: str, head_sha: str, run_git: GitRunner) -> list[str]:
     raw = run_git(["diff", "--name-only", "-z", f"{base_sha}...{head_sha}"], "buffer")
     assert isinstance(raw, bytes)
     return [entry for entry in raw.decode("utf-8").split("\x00") if entry]
+
+
+def count_changed_lines_for_files(
+    base_sha: str,
+    head_sha: str,
+    file_paths: list[str],
+    run_git: GitRunner,
+) -> int:
+    if not file_paths:
+        return 0
+
+    raw = run_git(["diff", "--numstat", f"{base_sha}...{head_sha}", "--", *file_paths], "utf8")
+    assert isinstance(raw, str)
+
+    total = 0
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+
+        columns = line.split("\t")
+        if len(columns) < 2:
+            continue
+
+        added_text, deleted_text = columns[0], columns[1]
+        if added_text.isdigit():
+            total += int(added_text)
+        if deleted_text.isdigit():
+            total += int(deleted_text)
+
+    return total
 
 
 def parse_path_filters_json(path_filters_json: str | None) -> list[str]:
@@ -130,6 +164,7 @@ def build_trusted_reviewer_inputs(
     prompt_rel: str,
     schema_file: str,
     path_filters_json: str,
+    max_changed_lines: int,
     prior_ledger: FindingsLedger,
     output_dir: str,
     run_git: GitRunner = default_run_git,
@@ -143,6 +178,8 @@ def build_trusted_reviewer_inputs(
     normalized_prompt_rel = require_env("PROMPT_REL", prompt_rel)
     normalized_schema_file = require_env("SCHEMA_FILE", schema_file)
     normalized_output_dir = require_env("OUTPUT_DIR", output_dir)
+    if not isinstance(max_changed_lines, int) or isinstance(max_changed_lines, bool) or max_changed_lines <= 0:
+        raise ValueError("MAX_CHANGED_LINES must be an integer greater than 0")
 
     if not is_valid_reviewer_id(normalized_reviewer):
         raise ValueError("REVIEWER must match ^[a-z0-9_]+$")
@@ -183,6 +220,20 @@ def build_trusted_reviewer_inputs(
             skip_reason=(
                 f"No changed files matched reviewer path filters for {normalized_base_sha}...{normalized_head_sha}"
             ),
+        )
+
+    scoped_changed_lines = count_changed_lines_for_files(
+        normalized_base_sha,
+        normalized_head_sha,
+        scoped_files,
+        run_git,
+    )
+    if scoped_changed_lines > max_changed_lines:
+        raise ReviewScopeTooLargeError(
+            "Scoped diff exceeds max_changed_lines "
+            f"for reviewer '{normalized_reviewer}' "
+            f"({scoped_changed_lines} changed lines across {len(scoped_files)} files; "
+            f"limit {max_changed_lines}). Use manual review or break the change into smaller PRs."
         )
 
     prompt_instructions = read_git_blob(
@@ -282,6 +333,7 @@ def main() -> None:
         prompt_rel=os.getenv("PROMPT_REL", ""),
         schema_file=os.getenv("SCHEMA_FILE", ""),
         path_filters_json=os.getenv("PATH_FILTERS_JSON", "[]"),
+        max_changed_lines=int(os.getenv("MAX_CHANGED_LINES", "1000")),
         prior_ledger=prior_ledger,
         output_dir=os.getenv("OUTPUT_DIR", ""),
     )

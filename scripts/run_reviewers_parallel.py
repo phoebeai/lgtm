@@ -9,7 +9,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from scripts.build_trusted_reviewer_inputs import build_trusted_reviewer_inputs
+from scripts.build_trusted_reviewer_inputs import ReviewScopeTooLargeError, build_trusted_reviewer_inputs
 from scripts.normalize_reviewer_output import process_reviewer_output
 from scripts.shared.findings_ledger import normalize_ledger
 from scripts.shared.reviewer_core import ReviewerReport
@@ -190,6 +190,7 @@ def run_single_reviewer(
             prompt_rel=reviewer["prompt_file"],
             schema_file=schema_file,
             path_filters_json=reviewer["paths_json"],
+            max_changed_lines=reviewer["max_changed_lines"],
             prior_ledger=prior_ledger,
             output_dir=prompts_dir,
             run_git=run_git,
@@ -211,6 +212,16 @@ def run_single_reviewer(
             review_step_outcome = review_result.outcome
             review_step_conclusion = review_result.conclusion
             review_step_error = review_result.error.strip()
+    except ReviewScopeTooLargeError as error:
+        reviewer_active = True
+        reviewer_has_inputs = True
+        prompt_step_outcome = "oversized"
+        prompt_step_conclusion = "skipped"
+        prompt_skip_reason = str(error)
+        raw_output = ""
+        review_step_outcome = ""
+        review_step_conclusion = ""
+        review_step_error = ""
     except Exception as error:
         reviewer_active = True
         reviewer_has_inputs = True
