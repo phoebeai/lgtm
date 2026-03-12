@@ -17,6 +17,7 @@ def test_lgtm_workflow_uses_uv_and_python_scripts() -> None:
     assert "secrets.lgtm_github_app_private_key" in body
     assert "steps.github_token.outputs.token" in body
     assert "steps.github_token.outputs.app-slug" in body
+    assert "steps.config.outputs.max_changed_lines" in body
     assert "id: setup_uv" in body
     assert "lgtm_github_token_prefix" not in body
     assert "lgtm_github_token_part1" not in body

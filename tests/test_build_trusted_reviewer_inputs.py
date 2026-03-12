@@ -1,9 +1,7 @@
 import json
 from pathlib import Path
 
-import pytest
-
-from scripts.build_trusted_reviewer_inputs import ReviewScopeTooLargeError, build_trusted_reviewer_inputs
+from scripts.build_trusted_reviewer_inputs import build_trusted_reviewer_inputs
 from scripts.shared.findings_ledger import normalize_ledger
 
 
@@ -43,36 +41,7 @@ def _fake_git_runner(*, changed_files: list[str], changed_lines: int, prompt_rel
     return run_git
 
 
-def test_build_trusted_reviewer_inputs_rejects_oversized_scope(tmp_path: Path) -> None:
-    schema_path = tmp_path / "schema.json"
-    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
-
-    with pytest.raises(
-        ReviewScopeTooLargeError,
-        match="Use manual review or break the change into smaller PRs",
-    ):
-        build_trusted_reviewer_inputs(
-            base_sha="base",
-            head_sha="head",
-            reviewer="security",
-            review_scope="security risk",
-            pr_number="123",
-            repository="acme/repo",
-            prompt_rel="examples/prompts/default/security.md",
-            schema_file=str(schema_path),
-            path_filters_json='["src/**"]',
-            max_changed_lines=1000,
-            prior_ledger=normalize_ledger(None),
-            output_dir=str(tmp_path / "out"),
-            run_git=_fake_git_runner(
-                changed_files=["src/app.py", "src/utils.py"],
-                changed_lines=1101,
-                prompt_rel="examples/prompts/default/security.md",
-            ),
-        )
-
-
-def test_build_trusted_reviewer_inputs_accepts_scope_within_limit(tmp_path: Path) -> None:
+def test_build_trusted_reviewer_inputs_accepts_scope(tmp_path: Path) -> None:
     schema_path = tmp_path / "schema.json"
     schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
 
@@ -86,12 +55,11 @@ def test_build_trusted_reviewer_inputs_accepts_scope_within_limit(tmp_path: Path
         prompt_rel="examples/prompts/default/security.md",
         schema_file=str(schema_path),
         path_filters_json='["src/**"]',
-        max_changed_lines=1000,
         prior_ledger=normalize_ledger(None),
         output_dir=str(tmp_path / "out"),
         run_git=_fake_git_runner(
             changed_files=["src/app.py", "src/utils.py"],
-            changed_lines=1000,
+            changed_lines=1101,
             prompt_rel="examples/prompts/default/security.md",
         ),
     )

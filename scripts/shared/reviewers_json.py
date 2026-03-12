@@ -77,12 +77,6 @@ def parse_reviewers_for_runner(reviewers_json: str | None) -> list[ReviewerConfi
             paths = row.entry.get("paths")
             paths_json = json.dumps(paths) if isinstance(paths, list) else "[]"
 
-        max_changed_lines_value = row.entry.get("max_changed_lines")
-        if not isinstance(max_changed_lines_value, int) or isinstance(max_changed_lines_value, bool):
-            raise ValueError(f"{label}.max_changed_lines must be an integer")
-        if max_changed_lines_value <= 0:
-            raise ValueError(f"{label}.max_changed_lines must be greater than 0")
-
         reviewers.append(
             ReviewerConfig(
                 id=row.reviewer_id,
@@ -90,7 +84,6 @@ def parse_reviewers_for_runner(reviewers_json: str | None) -> list[ReviewerConfi
                 prompt_file=prompt_file,
                 scope=scope,
                 paths_json=paths_json,
-                max_changed_lines=max_changed_lines_value,
             )
         )
 

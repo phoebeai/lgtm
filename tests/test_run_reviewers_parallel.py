@@ -1,9 +1,47 @@
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from scripts.run_reviewers_parallel import load_output_schema
+from scripts.run_reviewers_parallel import GLOBAL_ERRORS_FILENAME, load_output_schema, run_reviewers_parallel
+
+
+def _fake_git_runner(
+    *,
+    changed_files: list[str],
+    changed_lines_by_file: dict[str, int],
+    generated_files: set[str] | None = None,
+):
+    base_sha = "base"
+    head_sha = "head"
+    generated_paths = generated_files or set()
+
+    def run_git(args: list[str], encoding: str = "utf8") -> str | bytes:
+        if args[:2] == ["diff", "--name-only"] and args[2] == "-z":
+            payload = "\x00".join(changed_files) + "\x00"
+            return payload.encode("utf-8") if encoding == "buffer" else payload
+
+        if args[:3] == ["diff", "--numstat", f"{base_sha}...{head_sha}"]:
+            target_files = args[4:]
+            lines = []
+            for file_path in target_files:
+                file_total = changed_lines_by_file[file_path]
+                lines.append(f"{file_total}\t0\t{file_path}")
+            return "\n".join(lines)
+
+        if args[:2] == ["check-attr", "linguist-generated"]:
+            target_files = args[4:]
+            lines = []
+            for file_path in target_files:
+                attr_value = "true" if file_path in generated_paths else "unspecified"
+                lines.append(f"{file_path}: linguist-generated: {attr_value}")
+                lines.append(f"{file_path}: generated: unspecified")
+            return "\n".join(lines)
+
+        raise AssertionError(f"Unexpected git args: {args}")
+
+    return run_git
 
 
 def test_load_output_schema_accepts_object_json(tmp_path: Path) -> None:
@@ -21,3 +59,135 @@ def test_load_output_schema_rejects_non_object_json(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="root must be an object"):
         load_output_schema(str(schema_path))
+
+
+def test_run_reviewers_parallel_short_circuits_when_all_applicable_reviewers_are_oversized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    reports_dir = tmp_path / "reports"
+
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.make_run_git_for_workspace",
+        lambda workspace_dir: _fake_git_runner(
+            changed_files=["src/app.py", "src/utils.py"],
+            changed_lines_by_file={"src/app.py": 551, "src/utils.py": 550},
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.default_run_reviewer_with_openai",
+        lambda **kwargs: pytest.fail("reviewers should not execute after global oversized preflight"),
+    )
+
+    result = run_reviewers_parallel(
+        base_sha="base",
+        head_sha="head",
+        pr_number="123",
+        repository="acme/repo",
+        reviewers_json=json.dumps(
+            [
+                {
+                    "id": "security",
+                    "display_name": "Security",
+                    "prompt_file": "examples/prompts/default/security.md",
+                    "scope": "security risk",
+                    "paths": ["src/**"],
+                },
+                {
+                    "id": "code_quality",
+                    "display_name": "Code Quality",
+                    "prompt_file": "examples/prompts/default/code-quality.md",
+                    "scope": "code quality",
+                    "paths": ["src/**"],
+                },
+            ]
+        ),
+        resolved_model="gpt-5.3-codex",
+        max_changed_lines="1000",
+        schema_file=str(schema_path),
+        prompts_dir=str(prompts_dir),
+        reports_dir=str(reports_dir),
+        reviewer_timeout_minutes="10",
+        reviewer_timeout_ms="0",
+        prior_ledger_json_path="",
+        workspace_dir=str(tmp_path),
+    )
+
+    assert result["reviewer_count"] == 2
+    results = cast(list[dict[str, str]], result["results"])
+    assert [entry["run_state"] for entry in results] == ["skipped", "skipped"]
+
+    global_errors = json.loads((reports_dir / GLOBAL_ERRORS_FILENAME).read_text(encoding="utf-8"))
+    assert global_errors["errors"] == [
+        "Diff exceeds max_changed_lines "
+        "(1101 changed lines across 2 files; limit 1000). "
+        "Use manual review or break the change into smaller PRs."
+    ]
+
+    for reviewer_id in ("security", "code_quality"):
+        payload = json.loads((reports_dir / f"{reviewer_id}.json").read_text(encoding="utf-8"))
+        assert payload["run_state"] == "skipped"
+
+
+def test_run_reviewers_parallel_ignores_generated_files_when_evaluating_global_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    reports_dir = tmp_path / "reports"
+
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.make_run_git_for_workspace",
+        lambda workspace_dir: _fake_git_runner(
+            changed_files=["src/generated/api.ts", "src/app.py"],
+            changed_lines_by_file={"src/generated/api.ts": 5000, "src/app.py": 50},
+            generated_files={"src/generated/api.ts"},
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.run_single_reviewer",
+        lambda **kwargs: {
+            "reviewer": kwargs["reviewer"]["id"],
+            "run_state": "completed",
+            "summary": "ok",
+            "resolved_finding_ids": [],
+            "new_findings": [],
+            "errors": [],
+        },
+    )
+
+    result = run_reviewers_parallel(
+        base_sha="base",
+        head_sha="head",
+        pr_number="123",
+        repository="acme/repo",
+        reviewers_json=json.dumps(
+            [
+                {
+                    "id": "security",
+                    "display_name": "Security",
+                    "prompt_file": "examples/prompts/default/security.md",
+                    "scope": "security risk",
+                }
+            ]
+        ),
+        resolved_model="gpt-5.3-codex",
+        max_changed_lines="1000",
+        schema_file=str(schema_path),
+        prompts_dir=str(prompts_dir),
+        reports_dir=str(reports_dir),
+        reviewer_timeout_minutes="10",
+        reviewer_timeout_ms="0",
+        prior_ledger_json_path="",
+        workspace_dir=str(tmp_path),
+    )
+
+    assert result["reviewer_count"] == 1
+    assert not (reports_dir / GLOBAL_ERRORS_FILENAME).exists()
+    payload = json.loads((reports_dir / "security.json").read_text(encoding="utf-8"))
+    assert payload["run_state"] == "completed"

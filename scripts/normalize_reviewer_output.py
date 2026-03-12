@@ -54,14 +54,6 @@ def process_reviewer_output(
             errors=[],
         )
 
-    if normalized_prompt_step_outcome == "oversized":
-        message = (
-            normalized_prompt_skip_reason
-            if is_non_empty_string(normalized_prompt_skip_reason)
-            else "Scoped diff exceeds max_changed_lines. Use manual review or break the change into smaller PRs."
-        )
-        return make_error_payload(expected_reviewer, [message])
-
     if normalized_prompt_step_outcome != "success":
         reasons = ["trusted reviewer input build failed"]
         if is_non_empty_string(normalized_prompt_step_outcome):

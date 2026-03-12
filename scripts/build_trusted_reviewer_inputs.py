@@ -20,6 +20,8 @@ from scripts.shared.reviewer_core import is_valid_reviewer_id, normalize_finding
 from scripts.shared.types import FindingsLedger
 
 UNSAFE_PROMPT_PATH_PATTERN = "\x00"
+GENERATED_FILE_ATTRIBUTES = ("linguist-generated", "generated")
+TRUTHY_GIT_ATTRIBUTE_VALUES = {"set", "true", "yes", "1"}
 
 
 @dataclass(frozen=True)
@@ -28,10 +30,6 @@ class PreparedReviewerInputs:
     prompt_path: str
     schema_path: str
     skip_reason: str
-
-
-class ReviewScopeTooLargeError(ValueError):
-    pass
 
 
 def read_changed_files(base_sha: str, head_sha: str, run_git: GitRunner) -> list[str]:
@@ -68,6 +66,39 @@ def count_changed_lines_for_files(
             total += int(deleted_text)
 
     return total
+
+
+def list_generated_files(file_paths: list[str], run_git: GitRunner) -> list[str]:
+    if not file_paths:
+        return []
+
+    generated_paths: set[str] = set()
+    for start in range(0, len(file_paths), 100):
+        chunk = file_paths[start : start + 100]
+        raw = run_git(["check-attr", *GENERATED_FILE_ATTRIBUTES, "--", *chunk], "utf8")
+        assert isinstance(raw, str)
+
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+
+            parts = line.split(": ", 2)
+            if len(parts) != 3:
+                continue
+
+            file_path, attribute_name, attribute_value = parts
+            if (
+                attribute_name in GENERATED_FILE_ATTRIBUTES
+                and attribute_value.strip().lower() in TRUTHY_GIT_ATTRIBUTE_VALUES
+            ):
+                generated_paths.add(file_path)
+
+    return [file_path for file_path in file_paths if file_path in generated_paths]
+
+
+def exclude_generated_files(file_paths: list[str], run_git: GitRunner) -> list[str]:
+    generated_paths = set(list_generated_files(file_paths, run_git))
+    return [file_path for file_path in file_paths if file_path not in generated_paths]
 
 
 def parse_path_filters_json(path_filters_json: str | None) -> list[str]:
@@ -164,7 +195,6 @@ def build_trusted_reviewer_inputs(
     prompt_rel: str,
     schema_file: str,
     path_filters_json: str,
-    max_changed_lines: int,
     prior_ledger: FindingsLedger,
     output_dir: str,
     run_git: GitRunner = default_run_git,
@@ -178,8 +208,6 @@ def build_trusted_reviewer_inputs(
     normalized_prompt_rel = require_env("PROMPT_REL", prompt_rel)
     normalized_schema_file = require_env("SCHEMA_FILE", schema_file)
     normalized_output_dir = require_env("OUTPUT_DIR", output_dir)
-    if not isinstance(max_changed_lines, int) or isinstance(max_changed_lines, bool) or max_changed_lines <= 0:
-        raise ValueError("MAX_CHANGED_LINES must be an integer greater than 0")
 
     if not is_valid_reviewer_id(normalized_reviewer):
         raise ValueError("REVIEWER must match ^[a-z0-9_]+$")
@@ -220,20 +248,6 @@ def build_trusted_reviewer_inputs(
             skip_reason=(
                 f"No changed files matched reviewer path filters for {normalized_base_sha}...{normalized_head_sha}"
             ),
-        )
-
-    scoped_changed_lines = count_changed_lines_for_files(
-        normalized_base_sha,
-        normalized_head_sha,
-        scoped_files,
-        run_git,
-    )
-    if scoped_changed_lines > max_changed_lines:
-        raise ReviewScopeTooLargeError(
-            "Scoped diff exceeds max_changed_lines "
-            f"for reviewer '{normalized_reviewer}' "
-            f"({scoped_changed_lines} changed lines across {len(scoped_files)} files; "
-            f"limit {max_changed_lines}). Use manual review or break the change into smaller PRs."
         )
 
     prompt_instructions = read_git_blob(
@@ -333,7 +347,6 @@ def main() -> None:
         prompt_rel=os.getenv("PROMPT_REL", ""),
         schema_file=os.getenv("SCHEMA_FILE", ""),
         path_filters_json=os.getenv("PATH_FILTERS_JSON", "[]"),
-        max_changed_lines=int(os.getenv("MAX_CHANGED_LINES", "1000")),
         prior_ledger=prior_ledger,
         output_dir=os.getenv("OUTPUT_DIR", ""),
     )

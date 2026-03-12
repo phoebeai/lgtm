@@ -9,12 +9,19 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from scripts.build_trusted_reviewer_inputs import ReviewScopeTooLargeError, build_trusted_reviewer_inputs
+from scripts.build_trusted_reviewer_inputs import (
+    build_trusted_reviewer_inputs,
+    count_changed_lines_for_files,
+    exclude_generated_files,
+    read_changed_files,
+)
 from scripts.normalize_reviewer_output import process_reviewer_output
 from scripts.shared.findings_ledger import normalize_ledger
-from scripts.shared.reviewer_core import ReviewerReport
+from scripts.shared.reviewer_core import ReviewerReport, make_base_payload
 from scripts.shared.reviewers_json import parse_reviewers_for_runner
 from scripts.shared.types import FindingsLedger, ReviewerConfig
+
+GLOBAL_ERRORS_FILENAME = "global-errors.json"
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,79 @@ def load_output_schema(schema_path: str) -> dict[str, object]:
         raise ValueError(f"Invalid reviewer output schema at {schema_path}: root must be an object")
 
     return parsed
+
+
+def build_global_oversized_message(*, changed_lines: int, files_count: int, max_changed_lines: int) -> str:
+    return (
+        "Diff exceeds max_changed_lines "
+        f"({changed_lines} changed lines across {files_count} files; "
+        f"limit {max_changed_lines}). Use manual review or break the change into smaller PRs."
+    )
+
+
+def evaluate_global_preflight(
+    *,
+    base_sha: str,
+    head_sha: str,
+    max_changed_lines: int,
+    run_git,
+) -> str | None:
+    if not isinstance(max_changed_lines, int) or isinstance(max_changed_lines, bool) or max_changed_lines <= 0:
+        raise ValueError("MAX_CHANGED_LINES must be an integer greater than 0")
+
+    changed_files = read_changed_files(base_sha, head_sha, run_git)
+    if not changed_files:
+        return None
+
+    reviewable_files = exclude_generated_files(changed_files, run_git)
+    if not reviewable_files:
+        return None
+
+    changed_lines = count_changed_lines_for_files(base_sha, head_sha, reviewable_files, run_git)
+    if changed_lines <= max_changed_lines:
+        return None
+
+    return build_global_oversized_message(
+        changed_lines=changed_lines,
+        files_count=len(reviewable_files),
+        max_changed_lines=max_changed_lines,
+    )
+
+
+def write_global_preflight_reports(
+    *,
+    reviewers: list[ReviewerConfig],
+    reports_dir: str,
+    global_error: str,
+) -> list[dict[str, str]]:
+    Path(reports_dir).mkdir(parents=True, exist_ok=True)
+    (Path(reports_dir) / GLOBAL_ERRORS_FILENAME).write_text(
+        f'{json.dumps({"errors": [global_error]})}\n',
+        encoding="utf-8",
+    )
+
+    results: list[dict[str, str]] = []
+    for reviewer in reviewers:
+        payload = make_base_payload(
+            reviewer=reviewer["id"],
+            run_state="skipped",
+            summary="Skipped (global preflight failed: diff exceeds max_changed_lines)",
+            resolved_finding_ids=[],
+            new_findings=[],
+            errors=[],
+        )
+        report_path = Path(reports_dir) / f"{reviewer['id']}.json"
+        report_path.write_text(f"{json.dumps(payload)}\n", encoding="utf-8")
+        results.append(
+            {
+                "reviewer": reviewer["id"],
+                "run_state": payload["run_state"],
+                "report_path": str(report_path),
+            }
+        )
+
+    results.sort(key=lambda entry: entry["reviewer"])
+    return results
 
 
 def default_run_reviewer_with_openai(
@@ -190,7 +270,6 @@ def run_single_reviewer(
             prompt_rel=reviewer["prompt_file"],
             schema_file=schema_file,
             path_filters_json=reviewer["paths_json"],
-            max_changed_lines=reviewer["max_changed_lines"],
             prior_ledger=prior_ledger,
             output_dir=prompts_dir,
             run_git=run_git,
@@ -212,16 +291,6 @@ def run_single_reviewer(
             review_step_outcome = review_result.outcome
             review_step_conclusion = review_result.conclusion
             review_step_error = review_result.error.strip()
-    except ReviewScopeTooLargeError as error:
-        reviewer_active = True
-        reviewer_has_inputs = True
-        prompt_step_outcome = "oversized"
-        prompt_step_conclusion = "skipped"
-        prompt_skip_reason = str(error)
-        raw_output = ""
-        review_step_outcome = ""
-        review_step_conclusion = ""
-        review_step_error = ""
     except Exception as error:
         reviewer_active = True
         reviewer_has_inputs = True
@@ -255,6 +324,7 @@ def run_reviewers_parallel(
     repository: str,
     reviewers_json: str,
     resolved_model: str,
+    max_changed_lines: str,
     schema_file: str,
     prompts_dir: str,
     reports_dir: str,
@@ -273,6 +343,23 @@ def run_reviewers_parallel(
 
     Path(prompts_dir).mkdir(parents=True, exist_ok=True)
     Path(reports_dir).mkdir(parents=True, exist_ok=True)
+
+    global_preflight_error = evaluate_global_preflight(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        max_changed_lines=int(max_changed_lines),
+        run_git=run_git,
+    )
+    if global_preflight_error:
+        return {
+            "reviewer_count": len(reviewers),
+            "reports_dir": reports_dir,
+            "results": write_global_preflight_reports(
+                reviewers=reviewers,
+                reports_dir=reports_dir,
+                global_error=global_preflight_error,
+            ),
+        }
 
     results: list[dict[str, str]] = []
     futures = {}
@@ -325,6 +412,7 @@ def main() -> None:
         repository=read_required_env("REPOSITORY"),
         reviewers_json=read_required_env("REVIEWERS_JSON"),
         resolved_model=read_required_env("RESOLVED_MODEL"),
+        max_changed_lines=read_required_env("MAX_CHANGED_LINES"),
         schema_file=read_required_env("SCHEMA_FILE"),
         prompts_dir=read_required_env("PROMPTS_DIR"),
         reports_dir=read_required_env("REPORTS_DIR"),
