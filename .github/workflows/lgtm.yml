@@ -208,55 +208,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           API_URL: ${{ github.api_url }}
           REPOSITORY: ${{ github.repository }}
-        run: |
-          effective_event_name="${CALLER_EVENT_NAME:-$EVENT_NAME}"
-          resolved_pr_number=""
-
-          if [[ "$effective_event_name" == "pull_request" ]]; then
-            pr_number="$EVENT_PR_NUMBER"
-            base_sha="$EVENT_BASE_SHA"
-            head_sha="$EVENT_HEAD_SHA"
-          elif [[ -n "$PARSED_PR_NUMBER" && "$PARSED_PR_NUMBER" != "0" ]]; then
-            resolved_pr_number="$PARSED_PR_NUMBER"
-          elif [[ -n "$INPUT_PR_NUMBER" && "$INPUT_PR_NUMBER" != "0" ]]; then
-            resolved_pr_number="$INPUT_PR_NUMBER"
-          else
-            echo "This reusable workflow requires pull_request context or a pull_request_number input." >&2
-            exit 1
-          fi
-
-          if [[ -n "$resolved_pr_number" ]]; then
-            pr_json="$(curl --fail --silent --show-error \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "$API_URL/repos/$REPOSITORY/pulls/$resolved_pr_number")"
-
-            readarray -t pr_fields < <(
-              PR_JSON="$pr_json" python3 - <<'PY'
-import json
-import os
-
-pr = json.loads(os.environ["PR_JSON"])
-print(pr["number"])
-print(pr["base"]["sha"])
-print(pr["head"]["sha"])
-PY
-            )
-            pr_number="${pr_fields[0]}"
-            base_sha="${pr_fields[1]}"
-            head_sha="${pr_fields[2]}"
-          fi
-
-          if [[ -z "$pr_number" || -z "$base_sha" || -z "$head_sha" ]]; then
-            echo "Unable to resolve pull request metadata." >&2
-            exit 1
-          fi
-
-          {
-            echo "pr_number=$pr_number"
-            echo "base_sha=$base_sha"
-            echo "head_sha=$head_sha"
-          } >> "$GITHUB_OUTPUT"
+        run: uv run --project workflow-src python -m scripts.resolve_pull_request_metadata
 
       - name: Checkout pull request merge ref
         if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}

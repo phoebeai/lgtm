@@ -23,7 +23,8 @@ def test_lgtm_workflow_uses_uv_and_python_scripts() -> None:
     assert "comment_body" in body
     assert "reviewer_filter" in body
     assert "python3 -m scripts.parse_lgtm_rerun_command" in body
-    assert "readarray -t pr_fields" in body
+    assert "uv run --project workflow-src python -m scripts.resolve_pull_request_metadata" in body
+    assert "curl --fail --silent --show-error" not in body
     assert "python3 -c 'import json,sys; pr=json.load(sys.stdin)" not in body
     assert "lgtm_github_token_prefix" not in body
     assert "lgtm_github_token_part1" not in body
