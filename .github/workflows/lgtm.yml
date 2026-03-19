@@ -19,10 +19,15 @@ on:
         type: string
         default: .github/lgtm.yml
       pull_request_number:
-        description: Pull request number to review when caller is workflow_dispatch.
+        description: Pull request number to review when caller is not a pull_request event.
         required: false
         type: number
         default: 0
+      reviewer_filter:
+        description: Optional reviewer id to rerun while preserving prior results for other reviewers.
+        required: false
+        type: string
+        default: ""
       model:
         description: Override model for all reviewers. Empty uses config/default.
         required: false
@@ -143,11 +148,7 @@ jobs:
             pr_number="$EVENT_PR_NUMBER"
             base_sha="$EVENT_BASE_SHA"
             head_sha="$EVENT_HEAD_SHA"
-          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ -z "$INPUT_PR_NUMBER" || "$INPUT_PR_NUMBER" == "0" ]]; then
-              echo "pull_request_number input is required for workflow_dispatch." >&2
-              exit 1
-            fi
+          elif [[ -n "$INPUT_PR_NUMBER" && "$INPUT_PR_NUMBER" != "0" ]]; then
 
             pr_json="$(curl --fail --silent --show-error \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -158,7 +159,7 @@ jobs:
             base_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"base\"][\"sha\"], end=\"\")')"
             head_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"head\"][\"sha\"], end=\"\")')"
           else
-            echo "This reusable workflow requires pull_request context or pull_request_number for workflow_dispatch." >&2
+            echo "This reusable workflow requires pull_request context or a pull_request_number input." >&2
             exit 1
           fi
 
@@ -231,6 +232,7 @@ jobs:
       - name: Run reviewers
         env:
           OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
@@ -242,6 +244,8 @@ jobs:
           PROMPTS_DIR: ${{ runner.temp }}/lgtm-prompts
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
+          PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
+          REVIEWER_FILTER: ${{ inputs.reviewer_filter }}
           REVIEWER_TIMEOUT_MINUTES: ${{ inputs.reviewer_timeout_minutes }}
           WORKSPACE_DIR: ${{ github.workspace }}
         run: uv run --project workflow-src python -m scripts.run_reviewers_parallel

@@ -52,6 +52,10 @@ name: PR Checks
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -59,7 +63,34 @@ permissions:
   actions: read
 
 jobs:
+  parse_lgtm_rerun:
+    runs-on: ubuntu-latest
+    outputs:
+      should_rerun: ${{ steps.command.outputs.should_rerun }}
+      pr_number: ${{ steps.command.outputs.pr_number }}
+      reviewer_filter: ${{ steps.command.outputs.reviewer_filter }}
+    steps:
+      - name: Checkout LGTM workflow source
+        uses: actions/checkout@v5
+        with:
+          repository: phoebeai/lgtm
+          ref: v1
+          path: workflow-src
+          persist-credentials: false
+
+      - name: Parse LGTM rerun command
+        id: command
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          PYTHONPATH: ${{ github.workspace }}/workflow-src
+        run: python3 -m scripts.parse_lgtm_rerun_command
+
   lgtm:
+    needs: [parse_lgtm_rerun]
+    if: >-
+      github.event_name == 'pull_request' ||
+      needs.parse_lgtm_rerun.outputs.should_rerun == 'true'
     uses: phoebeai/lgtm/.github/workflows/lgtm.yml@v1
     with:
       config_path: .github/lgtm.yml
@@ -67,6 +98,8 @@ jobs:
       publish_inline_comments: true
       enforce_gate: true
       auto_approve_no_findings: true
+      pull_request_number: ${{ github.event_name != 'pull_request' && fromJson(needs.parse_lgtm_rerun.outputs.pr_number) || 0 }}
+      reviewer_filter: ${{ needs.parse_lgtm_rerun.outputs.reviewer_filter }}
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
       lgtm_github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}
@@ -74,6 +107,8 @@ jobs:
 ```
 
 6. Open or update a PR.
+
+Maintainers can comment `/lgtm rerun` or `/lgtm rerun security` on the PR or on an inline LGTM thread to trigger a fresh run. Reviewer prompts include prior inline-thread replies for existing findings so reruns can resolve findings based on the discussion.
 
 If you add the caller workflow and `.github/lgtm.yml` in the same PR, the first run will fail because trusted config and prompts are loaded from the PR base revision.
 
@@ -112,6 +147,7 @@ Inputs exposed by `.github/workflows/lgtm.yml`:
 - `reviewer_timeout_minutes` (default `10`)
 - `auto_approve_no_findings` (default `false`)
 - `pull_request_number` (used by `workflow_dispatch` callers)
+- `reviewer_filter` (optional reviewer id for targeted reruns)
 
 Secrets:
 

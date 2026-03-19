@@ -113,7 +113,10 @@ def test_run_reviewers_parallel_short_circuits_when_all_applicable_reviewers_are
         reviewer_timeout_minutes="10",
         reviewer_timeout_ms="0",
         prior_ledger_json_path="",
+        prior_artifact_dir="",
         workspace_dir=str(tmp_path),
+        github_token="",
+        reviewer_filter="",
     )
 
     assert result["reviewer_count"] == 2
@@ -184,10 +187,102 @@ def test_run_reviewers_parallel_ignores_generated_files_when_evaluating_global_p
         reviewer_timeout_minutes="10",
         reviewer_timeout_ms="0",
         prior_ledger_json_path="",
+        prior_artifact_dir="",
         workspace_dir=str(tmp_path),
+        github_token="",
+        reviewer_filter="",
     )
 
     assert result["reviewer_count"] == 1
     assert not (reports_dir / GLOBAL_ERRORS_FILENAME).exists()
     payload = json.loads((reports_dir / "security.json").read_text(encoding="utf-8"))
     assert payload["run_state"] == "completed"
+
+
+def test_run_reviewers_parallel_can_target_single_reviewer_and_seed_prior_reports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    reports_dir = tmp_path / "reports"
+    prior_artifact_dir = tmp_path / "prior-artifact"
+    prior_artifact_dir.mkdir()
+    (prior_artifact_dir / "code_quality.json").write_text(
+        json.dumps(
+            {
+                "reviewer": "code_quality",
+                "run_state": "error",
+                "summary": "Reviewer output unavailable or invalid",
+                "resolved_finding_ids": [],
+                "new_findings": [],
+                "errors": ["prior failure"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.make_run_git_for_workspace",
+        lambda workspace_dir: _fake_git_runner(
+            changed_files=["src/app.py"],
+            changed_lines_by_file={"src/app.py": 10},
+        ),
+    )
+
+    executed_reviewers: list[str] = []
+
+    def fake_run_single_reviewer(**kwargs):
+        executed_reviewers.append(kwargs["reviewer"]["id"])
+        return {
+            "reviewer": kwargs["reviewer"]["id"],
+            "run_state": "completed",
+            "summary": "ok",
+            "resolved_finding_ids": [],
+            "new_findings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("scripts.run_reviewers_parallel.run_single_reviewer", fake_run_single_reviewer)
+
+    result = run_reviewers_parallel(
+        base_sha="base",
+        head_sha="head",
+        pr_number="123",
+        repository="acme/repo",
+        reviewers_json=json.dumps(
+            [
+                {
+                    "id": "security",
+                    "display_name": "Security",
+                    "prompt_file": "examples/prompts/default/security.md",
+                    "scope": "security risk",
+                },
+                {
+                    "id": "code_quality",
+                    "display_name": "Code Quality",
+                    "prompt_file": "examples/prompts/default/code-quality.md",
+                    "scope": "code quality",
+                },
+            ]
+        ),
+        resolved_model="gpt-5.3-codex",
+        max_changed_lines="1000",
+        schema_file=str(schema_path),
+        prompts_dir=str(prompts_dir),
+        reports_dir=str(reports_dir),
+        reviewer_timeout_minutes="10",
+        reviewer_timeout_ms="0",
+        prior_ledger_json_path="",
+        prior_artifact_dir=str(prior_artifact_dir),
+        workspace_dir=str(tmp_path),
+        github_token="token",
+        reviewer_filter="security",
+    )
+
+    assert result["reviewer_count"] == 2
+    assert executed_reviewers == ["security"]
+    seeded_payload = json.loads((reports_dir / "code_quality.json").read_text(encoding="utf-8"))
+    assert seeded_payload["run_state"] == "error"
+    assert seeded_payload["errors"] == ["prior failure"]
