@@ -210,34 +210,30 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           effective_event_name="${CALLER_EVENT_NAME:-$EVENT_NAME}"
+          resolved_pr_number=""
 
           if [[ "$effective_event_name" == "pull_request" ]]; then
             pr_number="$EVENT_PR_NUMBER"
             base_sha="$EVENT_BASE_SHA"
             head_sha="$EVENT_HEAD_SHA"
           elif [[ -n "$PARSED_PR_NUMBER" && "$PARSED_PR_NUMBER" != "0" ]]; then
-
-            pr_json="$(curl --fail --silent --show-error \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "$API_URL/repos/$REPOSITORY/pulls/$PARSED_PR_NUMBER")"
-
-            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"number\"], end=\"\")')"
-            base_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"base\"][\"sha\"], end=\"\")')"
-            head_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"head\"][\"sha\"], end=\"\")')"
+            resolved_pr_number="$PARSED_PR_NUMBER"
           elif [[ -n "$INPUT_PR_NUMBER" && "$INPUT_PR_NUMBER" != "0" ]]; then
-
-            pr_json="$(curl --fail --silent --show-error \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "$API_URL/repos/$REPOSITORY/pulls/$INPUT_PR_NUMBER")"
-
-            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"number\"], end=\"\")')"
-            base_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"base\"][\"sha\"], end=\"\")')"
-            head_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"head\"][\"sha\"], end=\"\")')"
+            resolved_pr_number="$INPUT_PR_NUMBER"
           else
             echo "This reusable workflow requires pull_request context or a pull_request_number input." >&2
             exit 1
+          fi
+
+          if [[ -n "$resolved_pr_number" ]]; then
+            pr_json="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_URL/repos/$REPOSITORY/pulls/$resolved_pr_number")"
+
+            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"number\"], end=\"\")')"
+            base_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"base\"][\"sha\"], end=\"\")')"
+            head_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"head\"][\"sha\"], end=\"\")')"
           fi
 
           if [[ -z "$pr_number" || -z "$base_sha" || -z "$head_sha" ]]; then
@@ -257,6 +253,16 @@ jobs:
         with:
           ref: refs/pull/${{ steps.pr.outputs.pr_number }}/merge
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Refresh workflow source repository
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.workflow_source.outputs.workflow_repository }}
+          ref: ${{ steps.workflow_source.outputs.workflow_ref }}
+          path: workflow-src
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Install workflow dependencies

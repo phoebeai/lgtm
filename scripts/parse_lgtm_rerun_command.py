@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import cast
 
 from scripts.shared.comment_commands import (
     is_authorized_comment_author_association,
@@ -11,11 +12,11 @@ from scripts.shared.comment_commands import (
 from scripts.shared.github_output import write_github_output
 
 
-def normalize_text(value: str | int | float | bool | None) -> str:
+def normalize_text(value: object | None) -> str:
     return str("" if value is None else value).strip()
 
 
-def parse_positive_int(value: str | int | float | bool | None) -> int:
+def parse_positive_int(value: object | None) -> int:
     text = normalize_text(value)
     try:
         parsed = int(text)
@@ -24,7 +25,7 @@ def parse_positive_int(value: str | int | float | bool | None) -> int:
     return parsed if parsed > 0 else 0
 
 
-def parse_bool(value: str | int | float | bool | None) -> bool:
+def parse_bool(value: object | None) -> bool:
     if isinstance(value, bool):
         return value
     return normalize_text(value).lower() == "true"
@@ -44,7 +45,7 @@ def _payload_nested(payload: dict[str, object], *path: str) -> object | None:
     for key in path:
         if not isinstance(current, dict):
             return None
-        current = current.get(key)
+        current = cast(dict[str, object], current).get(key)
     return current
 
 
