@@ -13,6 +13,41 @@ on:
         required: false
         type: string
         default: v1
+      caller_event_name:
+        description: Event name from the caller workflow.
+        required: false
+        type: string
+        default: ""
+      comment_body:
+        description: Comment body from the caller event.
+        required: false
+        type: string
+        default: ""
+      comment_author_association:
+        description: Comment author association from the caller event.
+        required: false
+        type: string
+        default: ""
+      comment_user_type:
+        description: Comment author user type from the caller event.
+        required: false
+        type: string
+        default: ""
+      comment_issue_number:
+        description: Issue number from an issue_comment event.
+        required: false
+        type: number
+        default: 0
+      comment_issue_is_pull_request:
+        description: Whether an issue_comment event belongs to a pull request.
+        required: false
+        type: boolean
+        default: false
+      comment_review_pr_number:
+        description: Pull request number from a pull_request_review_comment event.
+        required: false
+        type: number
+        default: 0
       config_path:
         description: Path to repository-local LGTM config file.
         required: false
@@ -75,7 +110,7 @@ on:
         required: true
 
 concurrency:
-  group: lgtm-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.ref }}
+  group: lgtm-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pull_request_number || inputs.comment_review_pr_number || inputs.comment_issue_number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -114,13 +149,40 @@ jobs:
             echo "workflow_ref=$workflow_ref"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Checkout workflow source repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.workflow_source.outputs.workflow_repository }}
+          ref: ${{ steps.workflow_source.outputs.workflow_ref }}
+          path: workflow-src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Parse comment trigger
+        id: comment_trigger
+        env:
+          CALLER_EVENT_NAME: ${{ inputs.caller_event_name }}
+          COMMENT_BODY: ${{ inputs.comment_body }}
+          COMMENT_AUTHOR_ASSOCIATION: ${{ inputs.comment_author_association }}
+          COMMENT_USER_TYPE: ${{ inputs.comment_user_type }}
+          COMMENT_ISSUE_NUMBER: ${{ inputs.comment_issue_number }}
+          COMMENT_ISSUE_IS_PULL_REQUEST: ${{ inputs.comment_issue_is_pull_request }}
+          COMMENT_REVIEW_PR_NUMBER: ${{ inputs.comment_review_pr_number }}
+        run: python3 -m scripts.parse_lgtm_rerun_command
+
+      - name: Skip non-triggering comment event
+        if: ${{ steps.comment_trigger.outputs.should_run != 'true' }}
+        run: echo "Skipping LGTM run because this comment did not request /lgtm rerun."
+
       - name: Setup uv
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: setup_uv
         uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
 
       - name: Mint GitHub App installation token
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: github_token
         uses: actions/create-github-app-token@v1
         with:
@@ -133,21 +195,36 @@ jobs:
           permission-pull-requests: write
 
       - name: Resolve pull request metadata
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: pr
         env:
           EVENT_NAME: ${{ github.event_name }}
+          CALLER_EVENT_NAME: ${{ inputs.caller_event_name }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
+          PARSED_PR_NUMBER: ${{ steps.comment_trigger.outputs.pr_number }}
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           API_URL: ${{ github.api_url }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          effective_event_name="${CALLER_EVENT_NAME:-$EVENT_NAME}"
+
+          if [[ "$effective_event_name" == "pull_request" ]]; then
             pr_number="$EVENT_PR_NUMBER"
             base_sha="$EVENT_BASE_SHA"
             head_sha="$EVENT_HEAD_SHA"
+          elif [[ -n "$PARSED_PR_NUMBER" && "$PARSED_PR_NUMBER" != "0" ]]; then
+
+            pr_json="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_URL/repos/$REPOSITORY/pulls/$PARSED_PR_NUMBER")"
+
+            pr_number="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"number\"], end=\"\")')"
+            base_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"base\"][\"sha\"], end=\"\")')"
+            head_sha="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; pr=json.load(sys.stdin); print(pr[\"head\"][\"sha\"], end=\"\")')"
           elif [[ -n "$INPUT_PR_NUMBER" && "$INPUT_PR_NUMBER" != "0" ]]; then
 
             pr_json="$(curl --fail --silent --show-error \
@@ -175,26 +252,20 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout pull request merge ref
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         uses: actions/checkout@v5
         with:
           ref: refs/pull/${{ steps.pr.outputs.pr_number }}/merge
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Checkout workflow source repository
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ steps.workflow_source.outputs.workflow_repository }}
-          ref: ${{ steps.workflow_source.outputs.workflow_ref }}
-          path: workflow-src
-          fetch-depth: 1
-          persist-credentials: false
-
       - name: Install workflow dependencies
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         working-directory: workflow-src
         run: uv sync --all-groups
 
       - name: Load trusted review config
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: config
         env:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
@@ -205,6 +276,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.load_trusted_review_config
 
       - name: Find prior ledger artifact run
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: prior_ledger_run
         env:
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
@@ -214,7 +286,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.find_prior_ledger_run
 
       - name: Download prior ledger artifact
-        if: ${{ steps.prior_ledger_run.outputs.prior_run_id != '' }}
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' && steps.prior_ledger_run.outputs.prior_run_id != '' }}
         uses: actions/download-artifact@v6
         with:
           name: ${{ steps.prior_ledger_run.outputs.prior_artifact_name }}
@@ -223,6 +295,7 @@ jobs:
           path: ${{ runner.temp }}/lgtm-prior-artifact
 
       - name: Prepare prior ledger
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: prior_ledger
         env:
           PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
@@ -230,6 +303,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.prepare_prior_ledger
 
       - name: Run reviewers
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         env:
           OPENAI_API_KEY: ${{ secrets.openai_api_key }}
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
@@ -245,12 +319,13 @@ jobs:
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
           PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
-          REVIEWER_FILTER: ${{ inputs.reviewer_filter }}
+          REVIEWER_FILTER: ${{ steps.comment_trigger.outputs.reviewer_filter || inputs.reviewer_filter }}
           REVIEWER_TIMEOUT_MINUTES: ${{ inputs.reviewer_timeout_minutes }}
           WORKSPACE_DIR: ${{ github.workspace }}
         run: uv run --project workflow-src python -m scripts.run_reviewers_parallel
 
       - name: Compute pass/fail consensus
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
         id: consensus
         env:
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
@@ -268,7 +343,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.consensus
 
       - name: Dismiss prior LGTM bot approvals when failing
-        if: ${{ always() && steps.consensus.outputs.outcome != '' && steps.consensus.outputs.outcome != 'PASS' }}
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' && always() && steps.consensus.outputs.outcome != '' && steps.consensus.outputs.outcome != 'PASS' }}
         env:
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -278,7 +353,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.dismiss_bot_approvals_on_failure
 
       - name: Auto-approve PR when no findings
-        if: ${{ always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason == 'PASS_NO_FINDINGS' }}
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' && always() && inputs.auto_approve_no_findings && steps.consensus.outputs.outcome_reason == 'PASS_NO_FINDINGS' }}
         env:
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -287,7 +362,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.approve_pr_when_clean
 
       - name: Persist consensus artifacts
-        if: ${{ always() && steps.consensus.outputs.comment_path != '' && steps.consensus.outputs.ledger_path != '' }}
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' && always() && steps.consensus.outputs.comment_path != '' && steps.consensus.outputs.ledger_path != '' }}
         env:
           REVIEWERS_JSON: ${{ steps.config.outputs.reviewers_json }}
           CONSENSUS_REPORTS: ${{ steps.consensus.outputs.reports_json }}
@@ -299,7 +374,7 @@ jobs:
         run: uv run --project workflow-src python -m scripts.persist_consensus_artifacts
 
       - name: Upload LGTM artifact
-        if: ${{ always() }}
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' && always() }}
         uses: actions/upload-artifact@v6
         with:
           name: lgtm-${{ github.run_id }}
@@ -307,7 +382,7 @@ jobs:
           retention-days: 14
 
       - name: Upsert sticky PR comment
-        if: ${{ always() && inputs.publish_comment && steps.consensus.outputs.comment_path != '' }}
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' && always() && inputs.publish_comment && steps.consensus.outputs.comment_path != '' }}
         env:
           GITHUB_TOKEN: ${{ steps.github_token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}

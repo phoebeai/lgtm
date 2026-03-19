@@ -63,43 +63,25 @@ permissions:
   actions: read
 
 jobs:
-  parse_lgtm_rerun:
-    runs-on: ubuntu-latest
-    outputs:
-      should_rerun: ${{ steps.command.outputs.should_rerun }}
-      pr_number: ${{ steps.command.outputs.pr_number }}
-      reviewer_filter: ${{ steps.command.outputs.reviewer_filter }}
-    steps:
-      - name: Checkout LGTM workflow source
-        uses: actions/checkout@v5
-        with:
-          repository: phoebeai/lgtm
-          ref: v1
-          path: workflow-src
-          persist-credentials: false
-
-      - name: Parse LGTM rerun command
-        id: command
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_PATH: ${{ github.event_path }}
-          PYTHONPATH: ${{ github.workspace }}/workflow-src
-        run: python3 -m scripts.parse_lgtm_rerun_command
-
   lgtm:
-    needs: [parse_lgtm_rerun]
     if: >-
       github.event_name == 'pull_request' ||
-      needs.parse_lgtm_rerun.outputs.should_rerun == 'true'
+      github.event_name == 'issue_comment' ||
+      github.event_name == 'pull_request_review_comment'
     uses: phoebeai/lgtm/.github/workflows/lgtm.yml@v1
     with:
+      caller_event_name: ${{ github.event_name }}
+      comment_body: ${{ github.event.comment.body || '' }}
+      comment_author_association: ${{ github.event.comment.author_association || '' }}
+      comment_user_type: ${{ github.event.comment.user.type || '' }}
+      comment_issue_number: ${{ github.event_name == 'issue_comment' && github.event.issue.number || 0 }}
+      comment_issue_is_pull_request: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request != null }}
+      comment_review_pr_number: ${{ github.event_name == 'pull_request_review_comment' && github.event.pull_request.number || 0 }}
       config_path: .github/lgtm.yml
       publish_comment: true
       publish_inline_comments: true
       enforce_gate: true
       auto_approve_no_findings: true
-      pull_request_number: ${{ github.event_name != 'pull_request' && fromJson(needs.parse_lgtm_rerun.outputs.pr_number) || 0 }}
-      reviewer_filter: ${{ needs.parse_lgtm_rerun.outputs.reviewer_filter }}
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
       lgtm_github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}
@@ -139,6 +121,13 @@ Inputs exposed by `.github/workflows/lgtm.yml`:
 
 - `workflow_source_repository` (default `phoebeai/lgtm`)
 - `workflow_source_ref` (default `v1`)
+- `caller_event_name` (optional caller event name for comment-triggered reruns)
+- `comment_body` (optional caller comment body)
+- `comment_author_association` (optional caller comment author association)
+- `comment_user_type` (optional caller comment author type)
+- `comment_issue_number` (optional issue number from `issue_comment`)
+- `comment_issue_is_pull_request` (optional boolean for `issue_comment` PR context)
+- `comment_review_pr_number` (optional PR number from `pull_request_review_comment`)
 - `config_path` (default `.github/lgtm.yml`)
 - `model` (optional global override)
 - `publish_comment` (default `true`)
