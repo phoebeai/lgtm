@@ -75,6 +75,21 @@ class FindingsLedger(TypedDict):
     findings: list[LedgerFinding]
 
 
+class ReviewThreadComment(TypedDict):
+    comment_id: int | None
+    author: str
+    body: str
+    created_at: str
+    url: str
+
+
+class FindingThreadContext(TypedDict):
+    finding_id: str
+    thread_id: str
+    thread_resolved: bool
+    comments: list[ReviewThreadComment]
+
+
 class InlineCommentEntry(TypedDict, total=False):
     reviewer: str
     status: str

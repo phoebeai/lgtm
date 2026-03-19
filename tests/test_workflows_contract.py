@@ -19,6 +19,7 @@ def test_lgtm_workflow_uses_uv_and_python_scripts() -> None:
     assert "steps.github_token.outputs.app-slug" in body
     assert "steps.config.outputs.max_changed_lines" in body
     assert "id: setup_uv" in body
+    assert "reviewer_filter" in body
     assert "lgtm_github_token_prefix" not in body
     assert "lgtm_github_token_part1" not in body
     assert "lgtm_github_token_part2" not in body
@@ -30,6 +31,10 @@ def test_dogfood_workflow_uses_reusable_workflow_with_inherited_secrets() -> Non
     assert "mint_lgtm_app_token" not in body
     assert "uses: ./.github/workflows/lgtm.yml" in body
     assert "secrets: inherit" in body
+    assert "issue_comment:" in body
+    assert "pull_request_review_comment:" in body
+    assert "python3 -m scripts.parse_lgtm_rerun_command" in body
+    assert "reviewer_filter" in body
     assert "openai_api_key: ${{ secrets.OPENAI_API_KEY }}" not in body
     assert "lgtm_github_app_id: ${{ secrets.LGTM_GITHUB_APP_ID }}" not in body
     assert "lgtm_github_app_private_key: ${{ secrets.LGTM_GITHUB_APP_PRIVATE_KEY }}" not in body
@@ -37,6 +42,14 @@ def test_dogfood_workflow_uses_reusable_workflow_with_inherited_secrets() -> Non
     assert "lgtm_github_token_part1" not in body
     assert "lgtm_github_token_part2" not in body
     assert "github.token" not in body
+
+
+def test_smoke_consumer_example_includes_comment_rerun_workflow() -> None:
+    body = Path("examples/smoke-consumer/pr-checks.yml").read_text(encoding="utf-8")
+    assert "issue_comment:" in body
+    assert "pull_request_review_comment:" in body
+    assert "python3 -m scripts.parse_lgtm_rerun_command" in body
+    assert "uses: phoebeai/lgtm/.github/workflows/lgtm.yml@v1" in body
 
 
 def test_ci_workflow_runs_python_tooling() -> None:

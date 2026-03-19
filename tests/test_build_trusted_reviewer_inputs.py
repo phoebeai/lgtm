@@ -66,3 +66,73 @@ def test_build_trusted_reviewer_inputs_accepts_scope(tmp_path: Path) -> None:
 
     assert prepared.reviewer_active is True
     assert Path(prepared.prompt_path).exists()
+
+
+def test_build_trusted_reviewer_inputs_includes_thread_replies_for_prior_findings(tmp_path: Path) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    prior_ledger = normalize_ledger(
+        {
+            "version": 1,
+            "findings": [
+                {
+                    "id": "SEC001",
+                    "reviewer": "security",
+                    "status": "open",
+                    "title": "Prior finding",
+                    "recommendation": "Fix it",
+                    "file": "src/app.py",
+                    "line": 7,
+                    "created_run_id": "run-1",
+                    "created_at": "2026-03-19T10:00:00Z",
+                    "updated_run_id": "run-1",
+                    "updated_at": "2026-03-19T10:00:00Z",
+                    "resolved_at": None,
+                    "inline_comment_id": 101,
+                    "inline_comment_url": "https://example.com/comment/101",
+                    "inline_thread_id": "thread-1",
+                }
+            ],
+        }
+    )
+
+    prepared = build_trusted_reviewer_inputs(
+        base_sha="base",
+        head_sha="head",
+        reviewer="security",
+        review_scope="security risk",
+        pr_number="123",
+        repository="acme/repo",
+        prompt_rel="examples/prompts/default/security.md",
+        schema_file=str(schema_path),
+        path_filters_json='["src/**"]',
+        prior_ledger=prior_ledger,
+        output_dir=str(tmp_path / "out"),
+        github_token="token",
+        thread_context_fetcher=lambda **kwargs: {
+            "SEC001": {
+                "finding_id": "SEC001",
+                "thread_id": "thread-1",
+                "thread_resolved": False,
+                "comments": [
+                    {
+                        "comment_id": 202,
+                        "author": "simonwhitaker",
+                        "body": "This is fixed in the latest branch update.",
+                        "created_at": "2026-03-19T10:05:00Z",
+                        "url": "https://example.com/comment/202",
+                    }
+                ],
+            }
+        },
+        run_git=_fake_git_runner(
+            changed_files=["src/app.py"],
+            changed_lines=10,
+            prompt_rel="examples/prompts/default/security.md",
+        ),
+    )
+
+    prompt_body = Path(prepared.prompt_path).read_text(encoding="utf-8")
+    assert "Review-thread replies for prior findings in scope" in prompt_body
+    assert '"id": "SEC001"' in prompt_body
+    assert "This is fixed in the latest branch update." in prompt_body

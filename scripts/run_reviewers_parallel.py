@@ -17,7 +17,7 @@ from scripts.build_trusted_reviewer_inputs import (
 )
 from scripts.normalize_reviewer_output import process_reviewer_output
 from scripts.shared.findings_ledger import normalize_ledger
-from scripts.shared.reviewer_core import ReviewerReport, make_base_payload
+from scripts.shared.reviewer_core import ReviewerReport, make_base_payload, normalize_persisted_reviewer_report
 from scripts.shared.reviewers_json import parse_reviewers_for_runner
 from scripts.shared.types import FindingsLedger, ReviewerConfig
 
@@ -64,6 +64,10 @@ def read_prior_ledger(file_path: str) -> FindingsLedger:
         return normalize_ledger(parsed)
     except ValueError as error:
         raise ValueError(f"Invalid PRIOR_LEDGER_JSON ({normalized_path}): {error}") from error
+
+
+def _normalize_optional_text(value: str) -> str:
+    return value.strip()
 
 
 def make_run_git_for_workspace(workspace_dir: str):
@@ -181,6 +185,82 @@ def write_global_preflight_reports(
     return results
 
 
+def _resolve_target_reviewer_ids(reviewers: list[ReviewerConfig], reviewer_filter: str) -> set[str]:
+    normalized_filter = _normalize_optional_text(reviewer_filter)
+    if not normalized_filter:
+        return {reviewer["id"] for reviewer in reviewers}
+
+    known_ids = {reviewer["id"] for reviewer in reviewers}
+    if normalized_filter not in known_ids:
+        raise ValueError(f"Unknown reviewer_filter: {normalized_filter}")
+    return {normalized_filter}
+
+
+def _write_skip_report(*, reviewer: ReviewerConfig, reports_dir: str, summary: str) -> dict[str, str]:
+    payload = make_base_payload(
+        reviewer=reviewer["id"],
+        run_state="skipped",
+        summary=summary,
+        resolved_finding_ids=[],
+        new_findings=[],
+        errors=[],
+    )
+    report_path = Path(reports_dir) / f"{reviewer['id']}.json"
+    report_path.write_text(f"{json.dumps(payload)}\n", encoding="utf-8")
+    return {
+        "reviewer": reviewer["id"],
+        "run_state": payload["run_state"],
+        "report_path": str(report_path),
+    }
+
+
+def seed_reports_for_non_target_reviewers(
+    *,
+    reviewers: list[ReviewerConfig],
+    target_reviewer_ids: set[str],
+    reports_dir: str,
+    prior_artifact_dir: str,
+    reviewer_filter: str,
+) -> list[dict[str, str]]:
+    seeded_results: list[dict[str, str]] = []
+    normalized_prior_artifact_dir = _normalize_optional_text(prior_artifact_dir)
+    prior_artifact_path = Path(normalized_prior_artifact_dir) if normalized_prior_artifact_dir else None
+
+    for reviewer in reviewers:
+        reviewer_id = reviewer["id"]
+        if reviewer_id in target_reviewer_ids:
+            continue
+
+        report_path = Path(reports_dir) / f"{reviewer_id}.json"
+        copied = False
+        if prior_artifact_path is not None:
+            prior_report_path = prior_artifact_path / f"{reviewer_id}.json"
+            if prior_report_path.exists():
+                report_path.write_bytes(prior_report_path.read_bytes())
+                copied = True
+
+        if copied:
+            payload = normalize_persisted_reviewer_report(reviewer_id, report_path.read_text(encoding="utf-8"))
+            seeded_results.append(
+                {
+                    "reviewer": reviewer_id,
+                    "run_state": payload["run_state"],
+                    "report_path": str(report_path),
+                }
+            )
+            continue
+
+        seeded_results.append(
+            _write_skip_report(
+                reviewer=reviewer,
+                reports_dir=reports_dir,
+                summary=f"Skipped (slash-command rerun targeted reviewer {reviewer_filter})",
+            )
+        )
+
+    return seeded_results
+
+
 def default_run_reviewer_with_openai(
     *,
     model: str,
@@ -243,6 +323,7 @@ def run_single_reviewer(
     timeout_ms: int,
     workspace_dir: str,
     prior_ledger: FindingsLedger,
+    github_token: str,
     run_git,
 ) -> ReviewerReport:
     reviewer_id = reviewer["id"].strip()
@@ -272,6 +353,7 @@ def run_single_reviewer(
             path_filters_json=reviewer["paths_json"],
             prior_ledger=prior_ledger,
             output_dir=prompts_dir,
+            github_token=github_token,
             run_git=run_git,
         )
 
@@ -331,9 +413,13 @@ def run_reviewers_parallel(
     reviewer_timeout_minutes: str,
     reviewer_timeout_ms: str,
     prior_ledger_json_path: str,
+    prior_artifact_dir: str,
     workspace_dir: str,
+    github_token: str,
+    reviewer_filter: str,
 ) -> dict[str, str | int | list[dict[str, str]]]:
     reviewers = parse_reviewers_for_runner(reviewers_json)
+    target_reviewer_ids = _resolve_target_reviewer_ids(reviewers, reviewer_filter)
     timeout_ms = resolve_timeout_ms(
         reviewer_timeout_minutes=reviewer_timeout_minutes,
         reviewer_timeout_ms=reviewer_timeout_ms,
@@ -361,10 +447,17 @@ def run_reviewers_parallel(
             ),
         }
 
-    results: list[dict[str, str]] = []
+    results = seed_reports_for_non_target_reviewers(
+        reviewers=reviewers,
+        target_reviewer_ids=target_reviewer_ids,
+        reports_dir=reports_dir,
+        prior_artifact_dir=prior_artifact_dir,
+        reviewer_filter=reviewer_filter,
+    )
     futures = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(reviewers))) as executor:
-        for reviewer in reviewers:
+    selected_reviewers = [reviewer for reviewer in reviewers if reviewer["id"] in target_reviewer_ids]
+    with ThreadPoolExecutor(max_workers=max(1, len(selected_reviewers))) as executor:
+        for reviewer in selected_reviewers:
             future = executor.submit(
                 run_single_reviewer,
                 reviewer=reviewer,
@@ -378,6 +471,7 @@ def run_reviewers_parallel(
                 timeout_ms=timeout_ms,
                 workspace_dir=workspace_dir,
                 prior_ledger=prior_ledger,
+                github_token=github_token,
                 run_git=run_git,
             )
             futures[future] = reviewer["id"]
@@ -419,7 +513,10 @@ def main() -> None:
         reviewer_timeout_minutes=os.getenv("REVIEWER_TIMEOUT_MINUTES", "10"),
         reviewer_timeout_ms=os.getenv("REVIEWER_TIMEOUT_MS", "0"),
         prior_ledger_json_path=os.getenv("PRIOR_LEDGER_JSON", ""),
+        prior_artifact_dir=os.getenv("PRIOR_ARTIFACT_DIR", ""),
         workspace_dir=read_required_env("WORKSPACE_DIR"),
+        github_token=os.getenv("GITHUB_TOKEN", ""),
+        reviewer_filter=os.getenv("REVIEWER_FILTER", ""),
     )
 
     print(json.dumps(result))

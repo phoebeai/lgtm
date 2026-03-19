@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .comment_commands import parse_lgtm_rerun_command
 from .findings_ledger import apply_inline_comment_metadata
 from .github_client import github_graphql_request, github_request
-from .types import FindingsLedger, JSONValue, LedgerFinding, PresentationFinding
+from .types import FindingsLedger, FindingThreadContext, JSONValue, LedgerFinding, PresentationFinding, ReviewThreadComment
 
 RESOLVE_REVIEW_THREAD_MUTATION = """
   mutation ResolveReviewThread($threadId: ID!) {
@@ -43,6 +44,12 @@ REVIEW_THREADS_QUERY = """
             comments(first: 100) {
               nodes {
                 databaseId
+                body
+                createdAt
+                url
+                author {
+                  login
+                }
               }
             }
           }
@@ -57,6 +64,13 @@ REVIEW_THREADS_QUERY = """
 class ThreadMetadata:
     thread_id: str
     is_resolved: bool
+
+
+@dataclass
+class ThreadDiscussion:
+    thread_id: str
+    is_resolved: bool
+    comments: list[ReviewThreadComment]
 
 
 def _normalize_text(value: str | int | float | bool | None) -> str:
@@ -133,9 +147,20 @@ def fetch_review_thread_metadata_by_comment_id(
     repo: str,
     pr_number: str,
 ) -> dict[int, ThreadMetadata]:
+    metadata_by_comment_id, _ = _fetch_review_thread_data(token=token, repo=repo, pr_number=pr_number)
+    return metadata_by_comment_id
+
+
+def _fetch_review_thread_data(
+    *,
+    token: str,
+    repo: str,
+    pr_number: str,
+) -> tuple[dict[int, ThreadMetadata], dict[str, ThreadDiscussion]]:
     owner, name = _parse_repository(repo)
     number = _parse_pull_number(pr_number)
     metadata_by_comment_id: dict[int, ThreadMetadata] = {}
+    discussions_by_thread_id: dict[str, ThreadDiscussion] = {}
     cursor: str | None = None
 
     while True:
@@ -174,15 +199,43 @@ def fetch_review_thread_metadata_by_comment_id(
                 if isinstance(comments_value, list):
                     comments_nodes = comments_value
 
+            thread_comments: list[ReviewThreadComment] = []
             for comment in comments_nodes:
                 if not isinstance(comment, dict):
                     continue
                 database_id = comment.get("databaseId")
+                author_data = comment.get("author")
+                author = (
+                    _normalize_text(author_data.get("login"))
+                    if isinstance(author_data, dict)
+                    else ""
+                )
+                body = _normalize_text(comment.get("body") if isinstance(comment.get("body"), str) else None)
+                created_at = _normalize_text(
+                    comment.get("createdAt") if isinstance(comment.get("createdAt"), str) else None
+                )
+                url = _normalize_text(comment.get("url") if isinstance(comment.get("url"), str) else None)
                 if isinstance(database_id, int) and database_id > 0:
                     metadata_by_comment_id[database_id] = ThreadMetadata(
                         thread_id=thread_id,
                         is_resolved=resolved,
                     )
+                thread_comments.append(
+                    ReviewThreadComment(
+                        comment_id=database_id if isinstance(database_id, int) and database_id > 0 else None,
+                        author=author,
+                        body=body,
+                        created_at=created_at,
+                        url=url,
+                    )
+                )
+
+            if thread_id:
+                discussions_by_thread_id[thread_id] = ThreadDiscussion(
+                    thread_id=thread_id,
+                    is_resolved=resolved,
+                    comments=thread_comments,
+                )
 
         page_info = connection.get("pageInfo")
         if not isinstance(page_info, dict) or page_info.get("hasNextPage") is not True:
@@ -191,7 +244,63 @@ def fetch_review_thread_metadata_by_comment_id(
         end_cursor = page_info.get("endCursor")
         cursor = end_cursor if isinstance(end_cursor, str) else None
 
-    return metadata_by_comment_id
+    return metadata_by_comment_id, discussions_by_thread_id
+
+
+def fetch_finding_thread_contexts(
+    *,
+    token: str,
+    repo: str,
+    pr_number: str,
+    findings: list[LedgerFinding],
+) -> dict[str, FindingThreadContext]:
+    metadata_by_comment_id, discussions_by_thread_id = _fetch_review_thread_data(
+        token=token,
+        repo=repo,
+        pr_number=pr_number,
+    )
+    contexts: dict[str, FindingThreadContext] = {}
+
+    for finding in findings:
+        finding_id = _normalize_text(finding.get("id"))
+        if not finding_id:
+            continue
+
+        thread_id = _normalize_text(finding.get("inline_thread_id"))
+        if not thread_id:
+            comment_id = normalize_comment_id(finding.get("inline_comment_id"))
+            metadata = metadata_by_comment_id.get(comment_id) if comment_id else None
+            thread_id = _normalize_text(metadata.thread_id if metadata else None)
+        if not thread_id:
+            continue
+
+        discussion = discussions_by_thread_id.get(thread_id)
+        if discussion is None:
+            continue
+
+        inline_comment_id = normalize_comment_id(finding.get("inline_comment_id"))
+        filtered_comments: list[ReviewThreadComment] = []
+        for comment in discussion.comments:
+            comment_id = normalize_comment_id(comment.get("comment_id"))
+            if inline_comment_id and comment_id == inline_comment_id:
+                continue
+            if parse_lgtm_rerun_command(comment.get("body")) is not None:
+                continue
+            if not _normalize_text(comment.get("body")):
+                continue
+            filtered_comments.append(comment)
+
+        if not filtered_comments:
+            continue
+
+        contexts[finding_id] = FindingThreadContext(
+            finding_id=finding_id,
+            thread_id=thread_id,
+            thread_resolved=discussion.is_resolved,
+            comments=filtered_comments,
+        )
+
+    return contexts
 
 
 def backfill_missing_inline_thread_ids(
