@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from scripts.shared.reviewers_json import parse_reviewer_ids
 
+ARTIFACT_METADATA_FILENAME = "artifact-metadata.json"
 GLOBAL_ERRORS_FILENAME = "global-errors.json"
 
 
@@ -20,6 +22,10 @@ def copy_or_create_empty_file(source_path: Path, target_path: Path) -> None:
     write_text_file(target_path, "")
 
 
+def write_json_file(file_path: Path, value: dict[str, str]) -> None:
+    file_path.write_text(f"{json.dumps(value, indent=2)}\n", encoding="utf-8")
+
+
 def persist_consensus_artifacts(
     *,
     runner_temp: str,
@@ -30,6 +36,9 @@ def persist_consensus_artifacts(
     reviewer_errors_count: str,
     comment_path: str,
     ledger_path: str,
+    repository: str,
+    pr_number: str,
+    run_id: str,
 ) -> None:
     normalized_runner_temp = runner_temp.strip()
     if not normalized_runner_temp:
@@ -61,6 +70,14 @@ def persist_consensus_artifacts(
     write_text_file(target_dir / "outcome.txt", outcome)
     write_text_file(target_dir / "open-findings-count.txt", open_findings_count)
     write_text_file(target_dir / "reviewer-errors-count.txt", reviewer_errors_count)
+    write_json_file(
+        target_dir / ARTIFACT_METADATA_FILENAME,
+        {
+            "repository": repository.strip(),
+            "pr_number": pr_number.strip(),
+            "run_id": run_id.strip(),
+        },
+    )
 
     (target_dir / "comment.md").write_bytes(Path(normalized_comment_path).read_bytes())
     (target_dir / "findings-ledger.json").write_bytes(Path(normalized_ledger_path).read_bytes())
@@ -76,6 +93,9 @@ def main() -> None:
         reviewer_errors_count=os.getenv("REVIEWER_ERRORS_COUNT", "0"),
         comment_path=os.getenv("COMMENT_PATH", ""),
         ledger_path=os.getenv("LEDGER_PATH", ""),
+        repository=os.getenv("GITHUB_REPOSITORY", ""),
+        pr_number=os.getenv("PR_NUMBER", ""),
+        run_id=os.getenv("GITHUB_RUN_ID", ""),
     )
 
 
