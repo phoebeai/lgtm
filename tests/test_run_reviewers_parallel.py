@@ -290,7 +290,6 @@ def test_run_reviewers_parallel_can_target_single_reviewer_and_seed_prior_report
     assert seeded_payload["run_state"] == "error"
     assert seeded_payload["errors"] == ["prior failure"]
 
-
 def test_run_reviewers_parallel_does_not_seed_prior_reports_without_prior_run_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -352,7 +351,7 @@ def test_run_reviewers_parallel_does_not_seed_prior_reports_without_prior_run_id
                     "display_name": "Code Quality",
                     "prompt_file": "examples/prompts/default/code-quality.md",
                     "scope": "code quality",
-                },
+                }
             ]
         ),
         resolved_model="gpt-5.3-codex",
@@ -373,3 +372,73 @@ def test_run_reviewers_parallel_does_not_seed_prior_reports_without_prior_run_id
     seeded_payload = json.loads((reports_dir / "code_quality.json").read_text(encoding="utf-8"))
     assert seeded_payload["run_state"] == "skipped"
     assert seeded_payload["summary"] == "Skipped (slash-command rerun targeted reviewer security)"
+
+
+def test_run_reviewers_parallel_fetches_pr_context_once_and_passes_it_to_reviewers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    reports_dir = tmp_path / "reports"
+
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.make_run_git_for_workspace",
+        lambda workspace_dir: _fake_git_runner(
+            changed_files=["src/app.py"],
+            changed_lines_by_file={"src/app.py": 10},
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.fetch_pull_request_context",
+        lambda **kwargs: ("PR title", "PR body"),
+    )
+
+    captured_contexts: list[tuple[str, str]] = []
+
+    def fake_run_single_reviewer(**kwargs):
+        captured_contexts.append((kwargs["pr_title"], kwargs["pr_body"]))
+        return {
+            "reviewer": kwargs["reviewer"]["id"],
+            "run_state": "completed",
+            "summary": "ok",
+            "resolved_finding_ids": [],
+            "new_findings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("scripts.run_reviewers_parallel.run_single_reviewer", fake_run_single_reviewer)
+
+    result = run_reviewers_parallel(
+        base_sha="base",
+        head_sha="head",
+        pr_number="123",
+        repository="acme/repo",
+        reviewers_json=json.dumps(
+            [
+                {
+                    "id": "security",
+                    "display_name": "Security",
+                    "prompt_file": "examples/prompts/default/security.md",
+                    "scope": "security risk",
+                }
+            ]
+        ),
+        resolved_model="gpt-5.3-codex",
+        max_changed_lines="1000",
+        schema_file=str(schema_path),
+        prompts_dir=str(prompts_dir),
+        reports_dir=str(reports_dir),
+        reviewer_timeout_minutes="10",
+        reviewer_timeout_ms="0",
+        prior_ledger_json_path="",
+        prior_artifact_dir="",
+        prior_run_id="",
+        workspace_dir=str(tmp_path),
+        github_token="token",
+        reviewer_filter="",
+    )
+
+    assert result["reviewer_count"] == 1
+    assert captured_contexts == [("PR title", "PR body")]
