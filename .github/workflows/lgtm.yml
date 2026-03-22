@@ -254,6 +254,12 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: uv run --project workflow-src python -m scripts.find_prior_ledger_run
 
+      - name: Reset prior artifact directory
+        if: ${{ steps.comment_trigger.outputs.should_run == 'true' }}
+        run: |
+          rm -rf "${{ runner.temp }}/lgtm-prior-artifact"
+          mkdir -p "${{ runner.temp }}/lgtm-prior-artifact"
+
       - name: Download prior ledger artifact
         if: ${{ steps.comment_trigger.outputs.should_run == 'true' && steps.prior_ledger_run.outputs.prior_run_id != '' }}
         uses: actions/download-artifact@v6
@@ -269,6 +275,9 @@ jobs:
         env:
           PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
           PRIOR_LEDGER_JSON: ${{ runner.temp }}/lgtm-prior-ledger.json
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PRIOR_RUN_ID: ${{ steps.prior_ledger_run.outputs.prior_run_id }}
         run: uv run --project workflow-src python -m scripts.prepare_prior_ledger
 
       - name: Run reviewers
@@ -288,6 +297,7 @@ jobs:
           REPORTS_DIR: ${{ runner.temp }}/lgtm-reports
           PRIOR_LEDGER_JSON: ${{ steps.prior_ledger.outputs.prior_ledger_json }}
           PRIOR_ARTIFACT_DIR: ${{ runner.temp }}/lgtm-prior-artifact
+          PRIOR_RUN_ID: ${{ steps.prior_ledger_run.outputs.prior_run_id }}
           REVIEWER_FILTER: ${{ steps.comment_trigger.outputs.reviewer_filter || inputs.reviewer_filter }}
           REVIEWER_TIMEOUT_MINUTES: ${{ inputs.reviewer_timeout_minutes }}
           WORKSPACE_DIR: ${{ github.workspace }}
@@ -340,6 +350,9 @@ jobs:
           REVIEWER_ERRORS_COUNT: ${{ steps.consensus.outputs.reviewer_errors_count }}
           COMMENT_PATH: ${{ steps.consensus.outputs.comment_path }}
           LEDGER_PATH: ${{ steps.consensus.outputs.ledger_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: uv run --project workflow-src python -m scripts.persist_consensus_artifacts
 
       - name: Upload LGTM artifact

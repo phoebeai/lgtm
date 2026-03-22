@@ -16,8 +16,8 @@ from scripts.build_trusted_reviewer_inputs import (
     read_changed_files,
 )
 from scripts.normalize_reviewer_output import process_reviewer_output
-from scripts.shared.github_client import github_request
 from scripts.shared.findings_ledger import normalize_ledger
+from scripts.shared.github_client import github_request
 from scripts.shared.reviewer_core import ReviewerReport, make_base_payload, normalize_persisted_reviewer_report
 from scripts.shared.reviewers_json import parse_reviewers_for_runner
 from scripts.shared.types import FindingsLedger, ReviewerConfig
@@ -253,11 +253,17 @@ def seed_reports_for_non_target_reviewers(
     target_reviewer_ids: set[str],
     reports_dir: str,
     prior_artifact_dir: str,
+    prior_run_id: str,
     reviewer_filter: str,
 ) -> list[dict[str, str]]:
     seeded_results: list[dict[str, str]] = []
     normalized_prior_artifact_dir = _normalize_optional_text(prior_artifact_dir)
-    prior_artifact_path = Path(normalized_prior_artifact_dir) if normalized_prior_artifact_dir else None
+    normalized_prior_run_id = _normalize_optional_text(prior_run_id)
+    prior_artifact_path = (
+        Path(normalized_prior_artifact_dir)
+        if normalized_prior_artifact_dir and normalized_prior_run_id
+        else None
+    )
 
     for reviewer in reviewers:
         reviewer_id = reviewer["id"]
@@ -451,6 +457,7 @@ def run_reviewers_parallel(
     reviewer_timeout_ms: str,
     prior_ledger_json_path: str,
     prior_artifact_dir: str,
+    prior_run_id: str,
     workspace_dir: str,
     github_token: str,
     reviewer_filter: str,
@@ -494,6 +501,7 @@ def run_reviewers_parallel(
         target_reviewer_ids=target_reviewer_ids,
         reports_dir=reports_dir,
         prior_artifact_dir=prior_artifact_dir,
+        prior_run_id=prior_run_id,
         reviewer_filter=reviewer_filter,
     )
     futures = {}
@@ -558,6 +566,7 @@ def main() -> None:
         reviewer_timeout_ms=os.getenv("REVIEWER_TIMEOUT_MS", "0"),
         prior_ledger_json_path=os.getenv("PRIOR_LEDGER_JSON", ""),
         prior_artifact_dir=os.getenv("PRIOR_ARTIFACT_DIR", ""),
+        prior_run_id=os.getenv("PRIOR_RUN_ID", ""),
         workspace_dir=read_required_env("WORKSPACE_DIR"),
         github_token=os.getenv("GITHUB_TOKEN", ""),
         reviewer_filter=os.getenv("REVIEWER_FILTER", ""),
