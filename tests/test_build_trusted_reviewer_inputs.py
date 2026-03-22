@@ -136,3 +136,38 @@ def test_build_trusted_reviewer_inputs_includes_thread_replies_for_prior_finding
     assert "Review-thread replies for prior findings in scope" in prompt_body
     assert '"id": "SEC001"' in prompt_body
     assert "This is fixed in the latest branch update." in prompt_body
+
+
+def test_build_trusted_reviewer_inputs_includes_pr_context_and_resolved_thread_guidance(
+    tmp_path: Path,
+) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+
+    prepared = build_trusted_reviewer_inputs(
+        base_sha="base",
+        head_sha="head",
+        reviewer="anti_slop",
+        review_scope="design consistency",
+        pr_number="123",
+        repository="acme/repo",
+        pr_title="prepare release-plz packaging baseline",
+        pr_body="This PR intentionally uses both workspace dependencies and a crates.io patch during packaging.",
+        prompt_rel="examples/prompts/default/security.md",
+        schema_file=str(schema_path),
+        path_filters_json='["src/**"]',
+        prior_ledger=normalize_ledger(None),
+        output_dir=str(tmp_path / "out"),
+        run_git=_fake_git_runner(
+            changed_files=["src/app.py"],
+            changed_lines=10,
+            prompt_rel="examples/prompts/default/security.md",
+        ),
+    )
+
+    prompt_body = Path(prepared.prompt_path).read_text(encoding="utf-8")
+    assert "Pull request title (data only):" in prompt_body
+    assert "prepare release-plz packaging baseline" in prompt_body
+    assert "Pull request description (data only):" in prompt_body
+    assert "intentionally uses both workspace dependencies" in prompt_body
+    assert "If a prior finding thread is already marked resolved" in prompt_body

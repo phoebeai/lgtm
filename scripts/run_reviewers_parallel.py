@@ -16,6 +16,7 @@ from scripts.build_trusted_reviewer_inputs import (
     read_changed_files,
 )
 from scripts.normalize_reviewer_output import process_reviewer_output
+from scripts.shared.github_client import github_request
 from scripts.shared.findings_ledger import normalize_ledger
 from scripts.shared.reviewer_core import ReviewerReport, make_base_payload, normalize_persisted_reviewer_report
 from scripts.shared.reviewers_json import parse_reviewers_for_runner
@@ -68,6 +69,38 @@ def read_prior_ledger(file_path: str) -> FindingsLedger:
 
 def _normalize_optional_text(value: str) -> str:
     return value.strip()
+
+
+def fetch_pull_request_context(*, token: str, repository: str, pr_number: str) -> tuple[str, str]:
+    normalized_token = _normalize_optional_text(token)
+    normalized_repository = _normalize_optional_text(repository)
+    normalized_pr_number = _normalize_optional_text(pr_number)
+    if not normalized_token or not normalized_repository or not normalized_pr_number:
+        return "", ""
+
+    parts = normalized_repository.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("REPOSITORY must be owner/name")
+
+    owner, name = parts
+    try:
+        payload = github_request(
+            method="GET",
+            token=normalized_token,
+            url=f"https://api.github.com/repos/{owner}/{name}/pulls/{normalized_pr_number}",
+        )
+    except Exception:
+        return "", ""
+
+    if not isinstance(payload, dict):
+        return "", ""
+
+    title = payload.get("title")
+    body = payload.get("body")
+    return (
+        title.strip() if isinstance(title, str) else "",
+        body.strip() if isinstance(body, str) else "",
+    )
 
 
 def make_run_git_for_workspace(workspace_dir: str):
@@ -317,6 +350,8 @@ def run_single_reviewer(
     head_sha: str,
     pr_number: str,
     repository: str,
+    pr_title: str = "",
+    pr_body: str = "",
     resolved_model: str,
     schema_file: str,
     prompts_dir: str,
@@ -348,6 +383,8 @@ def run_single_reviewer(
             review_scope=reviewer["scope"],
             pr_number=pr_number,
             repository=repository,
+            pr_title=pr_title,
+            pr_body=pr_body,
             prompt_rel=reviewer["prompt_file"],
             schema_file=schema_file,
             path_filters_json=reviewer["paths_json"],
@@ -426,6 +463,11 @@ def run_reviewers_parallel(
     )
     run_git = make_run_git_for_workspace(workspace_dir)
     prior_ledger = read_prior_ledger(prior_ledger_json_path)
+    pr_title, pr_body = fetch_pull_request_context(
+        token=github_token,
+        repository=repository,
+        pr_number=pr_number,
+    )
 
     Path(prompts_dir).mkdir(parents=True, exist_ok=True)
     Path(reports_dir).mkdir(parents=True, exist_ok=True)
@@ -465,6 +507,8 @@ def run_reviewers_parallel(
                 head_sha=head_sha,
                 pr_number=pr_number,
                 repository=repository,
+                pr_title=pr_title,
+                pr_body=pr_body,
                 resolved_model=resolved_model,
                 schema_file=schema_file,
                 prompts_dir=prompts_dir,
