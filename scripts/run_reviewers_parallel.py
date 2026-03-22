@@ -16,8 +16,8 @@ from scripts.build_trusted_reviewer_inputs import (
     read_changed_files,
 )
 from scripts.normalize_reviewer_output import process_reviewer_output
-from scripts.shared.github_client import github_request
 from scripts.shared.findings_ledger import normalize_ledger
+from scripts.shared.github_client import github_request
 from scripts.shared.reviewer_core import ReviewerReport, make_base_payload, normalize_persisted_reviewer_report
 from scripts.shared.reviewers_json import parse_reviewers_for_runner
 from scripts.shared.types import FindingsLedger, ReviewerConfig
