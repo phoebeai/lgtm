@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,10 +34,53 @@ class PreparedReviewerInputs:
     skip_reason: str
 
 
+@dataclass(frozen=True)
+class NumstatEntry:
+    added: int | None
+    deleted: int | None
+    paths: tuple[str, ...]
+
+
 def read_changed_files(base_sha: str, head_sha: str, run_git: GitRunner) -> list[str]:
-    raw = run_git(["diff", "--name-only", "-z", f"{base_sha}...{head_sha}"], "buffer")
+    raw = run_git(["diff", "-M", "--name-only", "-z", f"{base_sha}...{head_sha}"], "buffer")
     assert isinstance(raw, bytes)
     return [entry for entry in raw.decode("utf-8").split("\x00") if entry]
+
+
+def _decode_numstat_path(value: bytes) -> str:
+    return value.decode("utf-8", errors="surrogateescape")
+
+
+def _parse_numstat_count(value: bytes) -> int | None:
+    text = value.decode("utf-8", errors="surrogateescape")
+    return int(text) if text.isdigit() else None
+
+
+def iter_numstat_entries(raw: bytes) -> Iterator[NumstatEntry]:
+    entries = iter(raw.split(b"\x00"))
+
+    for entry in entries:
+        if not entry:
+            continue
+
+        columns = entry.split(b"\t", 2)
+        if len(columns) < 2:
+            continue
+
+        if len(columns) >= 3 and columns[2]:
+            paths = (_decode_numstat_path(columns[2]),)
+        else:
+            old_path = next(entries, b"")
+            new_path = next(entries, b"")
+            if not old_path or not new_path:
+                break
+            paths = (_decode_numstat_path(old_path), _decode_numstat_path(new_path))
+
+        yield NumstatEntry(
+            added=_parse_numstat_count(columns[0]),
+            deleted=_parse_numstat_count(columns[1]),
+            paths=paths,
+        )
 
 
 def count_changed_lines_for_files(
@@ -48,23 +92,20 @@ def count_changed_lines_for_files(
     if not file_paths:
         return 0
 
-    raw = run_git(["diff", "--numstat", f"{base_sha}...{head_sha}", "--", *file_paths], "utf8")
-    assert isinstance(raw, str)
+    raw = run_git(["diff", "--numstat", "-z", "-M", f"{base_sha}...{head_sha}"], "buffer")
+    assert isinstance(raw, bytes)
+
+    target_paths = set(file_paths)
 
     total = 0
-    for line in raw.splitlines():
-        if not line.strip():
+    for entry in iter_numstat_entries(raw):
+        if not target_paths.intersection(entry.paths):
             continue
 
-        columns = line.split("\t")
-        if len(columns) < 2:
-            continue
-
-        added_text, deleted_text = columns[0], columns[1]
-        if added_text.isdigit():
-            total += int(added_text)
-        if deleted_text.isdigit():
-            total += int(deleted_text)
+        if entry.added is not None:
+            total += entry.added
+        if entry.deleted is not None:
+            total += entry.deleted
 
     return total
 
