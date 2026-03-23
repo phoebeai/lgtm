@@ -12,23 +12,42 @@ def _fake_git_runner(
     changed_files: list[str],
     changed_lines_by_file: dict[str, int],
     generated_files: set[str] | None = None,
+    rename_pairs: dict[str, str] | None = None,
 ):
     base_sha = "base"
     head_sha = "head"
     generated_paths = generated_files or set()
+    renamed_paths = rename_pairs or {}
 
     def run_git(args: list[str], encoding: str = "utf8") -> str | bytes:
-        if args[:2] == ["diff", "--name-only"] and args[2] == "-z":
+        if args[:3] == ["diff", "-M", "--name-only"] and args[3] == "-z":
             payload = "\x00".join(changed_files) + "\x00"
             return payload.encode("utf-8") if encoding == "buffer" else payload
 
-        if args[:3] == ["diff", "--numstat", f"{base_sha}...{head_sha}"]:
-            target_files = args[4:]
-            lines = []
-            for file_path in target_files:
+        if args[:4] == ["diff", "--numstat", "-z", "-M"] and args[4] == f"{base_sha}...{head_sha}":
+            entries: list[bytes] = []
+            handled_old_paths = set()
+            for file_path in changed_files:
+                old_path = renamed_paths.get(file_path)
+                if old_path is not None:
+                    file_total = changed_lines_by_file[file_path]
+                    entries.extend(
+                        [
+                            f"{file_total}\t0\t".encode("utf-8"),
+                            old_path.encode("utf-8"),
+                            file_path.encode("utf-8"),
+                        ]
+                    )
+                    handled_old_paths.add(old_path)
+                    continue
+
+                if file_path in handled_old_paths:
+                    continue
+
                 file_total = changed_lines_by_file[file_path]
-                lines.append(f"{file_total}\t0\t{file_path}")
-            return "\n".join(lines)
+                entries.append(f"{file_total}\t0\t{file_path}".encode("utf-8"))
+
+            return b"\x00".join(entries) + b"\x00"
 
         if args[:2] == ["check-attr", "linguist-generated"]:
             target_files = args[4:]
@@ -177,6 +196,75 @@ def test_run_reviewers_parallel_ignores_generated_files_when_evaluating_global_p
                     "display_name": "Security",
                     "prompt_file": "examples/prompts/default/security.md",
                     "scope": "security risk",
+                }
+            ]
+        ),
+        resolved_model="gpt-5.3-codex",
+        max_changed_lines="1000",
+        schema_file=str(schema_path),
+        prompts_dir=str(prompts_dir),
+        reports_dir=str(reports_dir),
+        reviewer_timeout_minutes="10",
+        reviewer_timeout_ms="0",
+        prior_ledger_json_path="",
+        prior_artifact_dir="",
+        prior_run_id="",
+        workspace_dir=str(tmp_path),
+        github_token="",
+        reviewer_filter="",
+    )
+
+    assert result["reviewer_count"] == 1
+    assert not (reports_dir / GLOBAL_ERRORS_FILENAME).exists()
+    payload = json.loads((reports_dir / "security.json").read_text(encoding="utf-8"))
+    assert payload["run_state"] == "completed"
+
+
+def test_run_reviewers_parallel_does_not_overcount_renamed_files_in_global_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    reports_dir = tmp_path / "reports"
+
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.make_run_git_for_workspace",
+        lambda workspace_dir: _fake_git_runner(
+            changed_files=["src/new_name.py", "src/other.py"],
+            changed_lines_by_file={
+                "src/new_name.py": 900,
+                "src/other.py": 100,
+            },
+            rename_pairs={"src/new_name.py": "src/old_name.py"},
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.run_reviewers_parallel.run_single_reviewer",
+        lambda **kwargs: {
+            "reviewer": kwargs["reviewer"]["id"],
+            "run_state": "completed",
+            "summary": "ok",
+            "resolved_finding_ids": [],
+            "new_findings": [],
+            "errors": [],
+        },
+    )
+
+    result = run_reviewers_parallel(
+        base_sha="base",
+        head_sha="head",
+        pr_number="123",
+        repository="acme/repo",
+        reviewers_json=json.dumps(
+            [
+                {
+                    "id": "security",
+                    "display_name": "Security",
+                    "prompt_file": "examples/prompts/default/security.md",
+                    "scope": "security risk",
+                    "paths": ["src/**"],
                 }
             ]
         ),

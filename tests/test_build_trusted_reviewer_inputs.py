@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from scripts.build_trusted_reviewer_inputs import build_trusted_reviewer_inputs
+from scripts.build_trusted_reviewer_inputs import build_trusted_reviewer_inputs, count_changed_lines_for_files
 from scripts.shared.findings_ledger import normalize_ledger
 
 
@@ -19,19 +19,19 @@ def _fake_git_runner(*, changed_files: list[str], changed_lines: int, prompt_rel
         if args == ["show", f"{base_sha}:{prompt_rel}"]:
             return "Trusted reviewer instructions."
 
-        if args == ["diff", "--name-only", "-z", f"{base_sha}...{head_sha}"]:
+        if args == ["diff", "-M", "--name-only", "-z", f"{base_sha}...{head_sha}"]:
             payload = "\x00".join(changed_files) + "\x00"
             return payload.encode("utf-8") if encoding == "buffer" else payload
 
-        if args[:3] == ["diff", "--numstat", f"{base_sha}...{head_sha}"]:
-            target_files = args[4:]
+        if args[:4] == ["diff", "--numstat", "-z", "-M"] and args[4] == f"{base_sha}...{head_sha}":
+            target_files = changed_files
             per_file = changed_lines // max(1, len(target_files))
             remainder = changed_lines - (per_file * len(target_files))
-            lines = []
+            entries: list[bytes] = []
             for index, file_path in enumerate(target_files):
                 file_total = per_file + (1 if index < remainder else 0)
-                lines.append(f"{file_total}\t0\t{file_path}")
-            return "\n".join(lines)
+                entries.append(f"{file_total}\t0\t{file_path}".encode("utf-8"))
+            return b"\x00".join(entries) + b"\x00"
 
         if args[:3] == ["diff", "--unified=3", f"{base_sha}...{head_sha}"]:
             return "diff --git a/src/app.py b/src/app.py\n+print('hello')\n"
@@ -66,6 +66,25 @@ def test_build_trusted_reviewer_inputs_accepts_scope(tmp_path: Path) -> None:
 
     assert prepared.reviewer_active is True
     assert Path(prepared.prompt_path).exists()
+
+
+def test_count_changed_lines_for_files_counts_renames_once() -> None:
+    def run_git(args: list[str], encoding: str = "utf8") -> str | bytes:
+        assert args == ["diff", "--numstat", "-z", "-M", "base...head"]
+        assert encoding == "buffer"
+        return (
+            b"22\t16\t\x00src/old_name.py\x00src/new_name.py\x00"
+            b"2\t1\tsrc/other.py\x00"
+        )
+
+    changed_lines = count_changed_lines_for_files(
+        "base",
+        "head",
+        ["src/new_name.py", "src/other.py"],
+        run_git,
+    )
+
+    assert changed_lines == 41
 
 
 def test_build_trusted_reviewer_inputs_includes_thread_replies_for_prior_findings(tmp_path: Path) -> None:
